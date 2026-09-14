@@ -8,7 +8,7 @@ const elements = {
   cameraStatus: $("#cameraStatus"), watchStatus: $("#watchStatus"), recordDot: $("#recordDot"),
   bufferLabel: $("#bufferLabel"), buttonSeconds: $("#buttonSeconds"), toast: $("#toast"),
   gallery: $("#gallery"), emptyGallery: $("#emptyGallery"), replayCount: $("#replayCount"),
-  durationSelect: $("#durationSelect"), qualitySelect: $("#qualitySelect"),
+  durationSelect: $("#durationSelect"), qualitySelect: $("#qualitySelect"), cameraSelect: $("#cameraSelect"),
   orientationSelect: $("#orientationSelect"), audioToggle: $("#audioToggle"), saveSettingsButton: $("#saveSettingsButton")
 };
 
@@ -22,6 +22,7 @@ const state = {
   chunkStartedAt: null,
   chunkChain: Promise.resolve(),
   boundaryResolver: null,
+  activeLens: "",
   settings: loadSettings(),
   controllerKey: getControllerKey(),
   db: null
@@ -83,15 +84,38 @@ async function startCamera() {
     const landscape = state.settings.orientation === "landscape";
     const width = state.settings.quality === 1080 ? 1920 : 1280;
     const height = state.settings.quality === 1080 ? 1080 : 720;
-    state.stream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        facingMode: { ideal: "environment" },
-        width: { ideal: landscape ? width : height },
-        height: { ideal: landscape ? height : width },
-        frameRate: { ideal: 30, max: 30 }
-      },
-      audio: state.settings.audio
-    });
+    const videoConstraints = {
+      facingMode: { ideal: "environment" },
+      width: { ideal: landscape ? width : height },
+      height: { ideal: landscape ? height : width },
+      frameRate: { ideal: 30, max: 30 }
+    };
+
+    let camera = await resolveCamera(state.settings.camera);
+    if (camera?.deviceId) {
+      delete videoConstraints.facingMode;
+      videoConstraints.deviceId = { exact: camera.deviceId };
+    }
+
+    try {
+      state.stream = await navigator.mediaDevices.getUserMedia({
+        video: videoConstraints,
+        audio: state.settings.audio
+      });
+    } catch (cameraError) {
+      // Se o Safari invalidar um deviceId após atualização/reinício, retorna à
+      // câmera traseira em vez de impedir o início da gravação.
+      console.warn("Selected camera unavailable; using rear camera", cameraError);
+      camera = null;
+      delete videoConstraints.deviceId;
+      videoConstraints.facingMode = { ideal: "environment" };
+      state.stream = await navigator.mediaDevices.getUserMedia({
+        video: videoConstraints,
+        audio: state.settings.audio
+      });
+    }
+
+    const selectedLens = await applyLensPreference(state.stream, state.settings.camera, camera);
 
     elements.video.srcObject = state.stream;
     await elements.video.play();
@@ -99,7 +123,7 @@ async function startCamera() {
     state.segments = [];
     state.initSegment = null;
     state.chunkStartedAt = Date.now();
-    setCameraUI(true);
+    setCameraUI(true, selectedLens);
     startRecorder();
     registerController();
     showToast("Câmera e replay ativados");
@@ -119,14 +143,69 @@ function stopCamera() {
   setCameraUI(false);
 }
 
-function setCameraUI(active) {
+function setCameraUI(active, lensLabel = "") {
+  state.activeLens = active ? lensLabel : "";
   elements.video.classList.toggle("active", active);
   elements.placeholder.classList.toggle("hidden", active);
   elements.recordDot.classList.toggle("live", active);
-  elements.cameraStatus.textContent = active ? "Buffer ativo" : "Em espera";
+  elements.cameraStatus.textContent = active ? `Buffer ativo${lensLabel ? ` • ${lensLabel}` : ""}` : "Em espera";
   elements.cameraButton.innerHTML = active ? "<span>■</span> Encerrar câmera" : "<span>●</span> Iniciar câmera";
   elements.replayButton.disabled = !active;
   elements.watchStatus.textContent = active ? "Conectado e pronto" : "Conectado — inicie a câmera";
+}
+
+async function resolveCamera(mode) {
+  if (mode === "auto" || !navigator.mediaDevices?.enumerateDevices) return null;
+
+  // No iPhone, os nomes e identificadores completos aparecem somente depois
+  // que a página recebeu permissão para usar a câmera.
+  let permissionStream;
+  let devices = await navigator.mediaDevices.enumerateDevices();
+  if (!devices.some(device => device.kind === "videoinput" && device.label)) {
+    permissionStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" } },
+      audio: false
+    });
+    devices = await navigator.mediaDevices.enumerateDevices();
+    permissionStream.getTracks().forEach(track => track.stop());
+  }
+
+  const cameras = devices.filter(device => device.kind === "videoinput");
+  const isFront = label => /front|frontal|face|user/i.test(label);
+  const isUltra = label => /ultra|0[.,]5|0\.5/i.test(label);
+  const rear = cameras.filter(device => !isFront(device.label));
+
+  if (mode === "ultrawide") {
+    return rear.find(device => isUltra(device.label)) || null;
+  }
+
+  return rear.find(device => !isUltra(device.label) && /back|rear|traseira|principal|main|wide/i.test(device.label))
+    || rear.find(device => !isUltra(device.label))
+    || null;
+}
+
+async function applyLensPreference(stream, mode, matchedCamera) {
+  if (mode === "auto") return "automática";
+  const track = stream.getVideoTracks()[0];
+
+  if (mode === "ultrawide" && !matchedCamera) {
+    // Alguns modelos expõem um dispositivo traseiro virtual e controlam as
+    // lentes pelo zoom. Quando houver zoom abaixo de 1, ele corresponde ao
+    // campo de visão ultra-angular.
+    try {
+      const capabilities = track.getCapabilities?.() || {};
+      if (capabilities.zoom && Number(capabilities.zoom.min) < 1) {
+        await track.applyConstraints({ advanced: [{ zoom: capabilities.zoom.min }] });
+        return "0,5×";
+      }
+    } catch (error) {
+      console.warn("Ultra-wide zoom unavailable", error);
+    }
+    showToast("O Safari não expôs a câmera 0,5×; usando a traseira disponível");
+    return "traseira";
+  }
+
+  return mode === "ultrawide" ? "0,5×" : "1×";
 }
 
 function startRecorder() {
@@ -271,7 +350,9 @@ async function requestReplay(source) {
   } finally {
     state.saving = false;
     elements.replayButton.disabled = !state.running;
-    elements.cameraStatus.textContent = state.running ? "Buffer ativo" : "Em espera";
+    elements.cameraStatus.textContent = state.running
+      ? `Buffer ativo${state.activeLens ? ` • ${state.activeLens}` : ""}`
+      : "Em espera";
   }
 }
 
@@ -386,6 +467,7 @@ function saveSettings() {
   state.settings = {
     duration: Number(elements.durationSelect.value),
     quality: Number(elements.qualitySelect.value),
+    camera: elements.cameraSelect.value,
     orientation: elements.orientationSelect.value,
     audio: elements.audioToggle.checked
   };
@@ -399,15 +481,16 @@ function saveSettings() {
 
 function loadSettings() {
   try {
-    return { duration: 40, quality: 1080, orientation: "landscape", audio: true, ...JSON.parse(localStorage.getItem("jb-replay-settings")) };
+    return { duration: 40, quality: 1080, camera: "auto", orientation: "landscape", audio: true, ...JSON.parse(localStorage.getItem("jb-replay-settings")) };
   } catch {
-    return { duration: 40, quality: 1080, orientation: "landscape", audio: true };
+    return { duration: 40, quality: 1080, camera: "auto", orientation: "landscape", audio: true };
   }
 }
 
 function applySettingsToUI() {
   elements.durationSelect.value = state.settings.duration;
   elements.qualitySelect.value = state.settings.quality;
+  elements.cameraSelect.value = state.settings.camera || "auto";
   elements.orientationSelect.value = state.settings.orientation;
   elements.audioToggle.checked = state.settings.audio;
   elements.bufferLabel.textContent = `${state.settings.duration}s`;
