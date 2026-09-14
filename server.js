@@ -20,7 +20,7 @@ const upload = multer({
   // Grava os segmentos no disco temporário para não ocupar toda a memória do
   // serviço durante uploads em 1080p.
   dest: os.tmpdir(),
-  limits: { files: 40, fileSize: 40 * 1024 * 1024, fieldSize: 1024 * 1024 }
+  limits: { files: 40, fileSize: 120 * 1024 * 1024, fieldSize: 1024 * 1024 }
 });
 
 app.disable("x-powered-by");
@@ -57,8 +57,10 @@ app.post("/api/render", upload.array("segments", 40), async (req, res) => {
 
   const jobId = crypto.randomUUID();
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), `jb-replay-${jobId}-`));
+  const joinedPath = path.join(workDir, "joined.mp4");
   const outputPath = path.join(workDir, "JB-Replay.mp4");
   const uploadedPaths = req.files.map(file => file.path).filter(Boolean);
+  const requestedDuration = Math.max(1, Math.min(60, Number(req.body.duration) || 15));
 
   try {
     const inputPaths = [];
@@ -82,7 +84,7 @@ app.post("/api/render", upload.array("segments", 40), async (req, res) => {
         "-hide_banner", "-loglevel", "error", "-y",
         "-f", "concat", "-safe", "0", "-i", listPath,
         "-map", "0:v:0", "-map", "0:a?",
-        "-c", "copy", "-movflags", "+faststart", outputPath
+        "-c", "copy", "-movflags", "+faststart", joinedPath
       ]);
     } catch {
       // Compatibilidade para aparelhos/navegadores que entregarem WebM ou
@@ -93,8 +95,22 @@ app.post("/api/render", upload.array("segments", 40), async (req, res) => {
         "-f", "concat", "-safe", "0", "-i", listPath,
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
         "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart", joinedPath
+      ]);
+    }
+
+    try {
+      // Conserva somente os segundos finais escolhidos. A cópia de stream é
+      // rápida e também normaliza os timestamps do buffer fragmentado.
+      await runFfmpeg([
+        "-hide_banner", "-loglevel", "error", "-y",
+        "-sseof", `-${requestedDuration}`, "-i", joinedPath,
+        "-map", "0:v:0", "-map", "0:a?", "-t", String(requestedDuration),
+        "-c", "copy", "-avoid_negative_ts", "make_zero",
         "-movflags", "+faststart", outputPath
       ]);
+    } catch {
+      await fs.copyFile(joinedPath, outputPath);
     }
 
     const stamp = new Date().toISOString().replaceAll(":", "-").replace(/\.\d{3}Z$/, "");
