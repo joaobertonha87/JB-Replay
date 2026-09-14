@@ -126,10 +126,43 @@ app.post("/api/render", upload.array("segments", 40), async (req, res) => {
   }
 });
 
+app.post("/api/upscale", upload.single("video"), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ ok: false, message: "Nenhum replay recebido." });
+  }
+
+  const jobId = crypto.randomUUID();
+  const workDir = await fs.mkdtemp(path.join(os.tmpdir(), `jb-replay-upscale-${jobId}-`));
+  const inputPath = path.join(workDir, "original.mp4");
+  const outputPath = path.join(workDir, "JB-Replay-1080p.mp4");
+
+  try {
+    await fs.rename(req.file.path, inputPath);
+    const videoFilter = "hqdn3d=1.0:1.0:3:3,scale=w='if(gt(iw,ih),1920,1080)':h='if(gt(iw,ih),1080,1920)':flags=lanczos,unsharp=5:5:0.4:3:3:0.1,setsar=1";
+    await runFfmpeg([
+      "-hide_banner", "-loglevel", "error", "-y", "-i", inputPath,
+      "-map", "0:v:0", "-map", "0:a?", "-vf", videoFilter,
+      "-c:v", "libx264", "-preset", "veryfast", "-crf", "19",
+      "-profile:v", "high", "-level", "4.1", "-pix_fmt", "yuv420p",
+      "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", outputPath
+    ]);
+
+    const stamp = new Date().toISOString().replaceAll(":", "-").replace(/\.\d{3}Z$/, "");
+    res.download(outputPath, `JB-Replay-${stamp}-1080p.mp4`, async () => {
+      await fs.rm(workDir, { recursive: true, force: true });
+    });
+  } catch (error) {
+    await fs.rm(workDir, { recursive: true, force: true });
+    await fs.rm(req.file.path, { force: true }).catch(() => {});
+    console.error("Upscale failed", error);
+    res.status(500).json({ ok: false, message: "Não foi possível gerar a versão 1080p." });
+  }
+});
+
 app.use((error, _req, res, _next) => {
   console.error("Upload failed", error);
   if (error instanceof multer.MulterError && error.code === "LIMIT_FILE_SIZE") {
-    return res.status(413).json({ ok: false, message: "Trecho muito grande. Selecione 720p e tente novamente." });
+    return res.status(413).json({ ok: false, message: "O vídeo é grande demais para processar." });
   }
   return res.status(500).json({ ok: false, message: "Falha ao receber os trechos do replay." });
 });
