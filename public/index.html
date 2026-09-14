@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta name="theme-color" content="#070a08">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="JB Replay">
+  <title>JB Replay</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/icon-180.png">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true"><span>JB</span></div>
+        <div>
+          <h1>JB Replay</h1>
+          <p>Seu melhor lance, de volta.</p>
+        </div>
+      </div>
+      <button class="icon-button" id="settingsButton" aria-label="Abrir configurações">⚙</button>
+    </header>
+
+    <section class="camera-card" id="cameraCard">
+      <video id="cameraPreview" autoplay muted playsinline></video>
+      <div class="camera-placeholder" id="cameraPlaceholder">
+        <div class="lens"><span></span></div>
+        <strong>Câmera pronta para entrar em quadra</strong>
+        <small>O vídeo só será salvo quando você pedir um replay.</small>
+      </div>
+
+      <div class="camera-hud">
+        <div class="status-pill"><i id="recordDot"></i><span id="cameraStatus">Em espera</span></div>
+        <div class="status-pill"><span id="bufferLabel">40s</span> em memória</div>
+      </div>
+
+      <div class="frame-corners" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+      <div class="toast" id="toast" role="status"></div>
+    </section>
+
+    <section class="connection-strip">
+      <div class="connection-info">
+        <span class="watch-icon">⌚</span>
+        <div><strong>Apple Watch</strong><small id="watchStatus">Aguardando início da câmera</small></div>
+      </div>
+      <button id="watchSetupButton" class="text-button">Configurar</button>
+    </section>
+
+    <section class="controls">
+      <button id="cameraButton" class="secondary-action"><span>●</span> Iniciar câmera</button>
+      <button id="replayButton" class="replay-action" disabled>
+        <span class="replay-ring"><b>↶</b></span>
+        <span><strong>Salvar replay</strong><small>últimos <b id="buttonSeconds">40</b> segundos</small></span>
+      </button>
+    </section>
+
+    <section class="gallery-section">
+      <div class="section-title"><div><span>SEUS LANCES</span><h2>Replays salvos</h2></div><b id="replayCount">0</b></div>
+      <div class="empty-gallery" id="emptyGallery">
+        <span>▶</span><p>Seus melhores lances aparecerão aqui.</p>
+      </div>
+      <div class="gallery" id="gallery"></div>
+    </section>
+  </main>
+
+  <dialog id="settingsDialog">
+    <form method="dialog" class="sheet">
+      <div class="sheet-handle"></div>
+      <div class="sheet-title"><div><span>CONFIGURAÇÕES</span><h2>Preparar gravação</h2></div><button value="cancel" aria-label="Fechar">×</button></div>
+
+      <label>Duração anterior ao toque
+        <select id="durationSelect">
+          <option value="15">15 segundos</option>
+          <option value="20">20 segundos</option>
+          <option value="30">30 segundos</option>
+          <option value="40" selected>40 segundos</option>
+        </select>
+      </label>
+      <label>Qualidade
+        <select id="qualitySelect">
+          <option value="720">HD 720p</option>
+          <option value="1080" selected>Full HD 1080p</option>
+        </select>
+      </label>
+      <label>Orientação
+        <select id="orientationSelect">
+          <option value="landscape" selected>Horizontal — recomendado</option>
+          <option value="portrait">Vertical</option>
+        </select>
+      </label>
+      <label class="toggle-row"><span><strong>Gravar áudio</strong><small>Som da quadra e comemoração</small></span><input id="audioToggle" type="checkbox" checked></label>
+      <button value="default" id="saveSettingsButton" class="sheet-primary">Salvar configurações</button>
+    </form>
+  </dialog>
+
+  <dialog id="watchDialog">
+    <div class="sheet">
+      <div class="sheet-handle"></div>
+      <div class="sheet-title"><div><span>CONTROLE REMOTO</span><h2>Botão no Apple Watch</h2></div><button id="closeWatchDialog" aria-label="Fechar">×</button></div>
+      <ol class="steps">
+        <li><b>1</b><span>No iPhone, abra o aplicativo <strong>Atalhos</strong>.</span></li>
+        <li><b>2</b><span>Crie um atalho com a ação <strong>Obter conteúdo do URL</strong>.</span></li>
+        <li><b>3</b><span>Cole o endereço pessoal abaixo e escolha o método GET.</span></li>
+        <li><b>4</b><span>Ative <strong>Mostrar no Apple Watch</strong> e nomeie como “Salvar Replay”.</span></li>
+      </ol>
+      <div class="url-box"><code id="watchUrl"></code><button id="copyUrlButton">Copiar</button></div>
+      <p class="privacy-note">Este endereço funciona como sua chave pessoal. Não compartilhe com outras pessoas.</p>
+      <button id="testWatchButton" class="sheet-primary">Testar botão agora</button>
+    </div>
+  </dialog>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,23 @@
+{
+  "name": "jb-replay",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Replay retroativo para aulas de beach tennis controlado pelo Apple Watch",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js && node --check public/app.js && node --check public/sw.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "ffmpeg-static": "^5.2.0",
+    "multer": "^2.0.2",
+    "socket.io": "^4.8.1"
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.8.1"
+  }
+}

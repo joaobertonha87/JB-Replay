@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: jb-replay
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeploy: true
