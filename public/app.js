@@ -84,7 +84,11 @@ async function startCamera() {
   }
 
   try {
-    let camera = await resolveCamera(state.settings.camera);
+    // A frontal é solicitada diretamente por facingMode. Isso evita a
+    // identificação instável dos nomes das lentes no Safari do iPhone.
+    let camera = state.settings.camera === "front"
+      ? null
+      : await resolveCamera(state.settings.camera);
     const capture = await openCameraStream(camera, state.settings.audio);
     state.stream = capture.stream;
     if (!capture.usedSelectedCamera) camera = null;
@@ -110,7 +114,9 @@ async function startCamera() {
 
 async function openCameraStream(camera, audio) {
   const wantsFront = state.settings.camera === "front";
-  const source = camera?.deviceId
+  const source = wantsFront
+    ? { facingMode: { exact: "user" } }
+    : camera?.deviceId
     ? { deviceId: { exact: camera.deviceId } }
     : { facingMode: { ideal: wantsFront ? "user" : "environment" } };
   const constraints = {
@@ -127,6 +133,16 @@ async function openCameraStream(camera, audio) {
       usedSelectedCamera: Boolean(camera?.deviceId)
     };
   } catch (error) {
+    if (wantsFront) {
+      // Alguns iPhones não aceitam `exact`, mas respeitam a preferência
+      // `ideal`. Em nenhuma das tentativas pedimos a câmera traseira.
+      delete constraints.deviceId;
+      constraints.facingMode = { ideal: "user" };
+      return {
+        stream: await navigator.mediaDevices.getUserMedia({ video: constraints, audio }),
+        usedSelectedCamera: false
+      };
+    }
     if (!camera?.deviceId) throw error;
     delete constraints.deviceId;
     constraints.facingMode = { ideal: wantsFront ? "user" : "environment" };
@@ -213,7 +229,8 @@ async function applyLensPreference(stream, mode, matchedCamera) {
   const track = stream.getVideoTracks()[0];
 
   if (mode === "front") {
-    updateCameraDiagnostic(`Câmera frontal selecionada${matchedCamera?.label ? `: ${matchedCamera.label}` : "."}`);
+    const facingMode = track.getSettings?.().facingMode;
+    updateCameraDiagnostic(`Câmera frontal ativa${facingMode ? ` • modo ${facingMode}` : "."}`);
     elements.video.classList.add("mirrored");
     return "frontal";
   }
