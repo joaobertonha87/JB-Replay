@@ -142,18 +142,22 @@ app.post("/api/upscale", upload.single("video"), async (req, res) => {
     // anterior combinava redução de ruído, Lanczos e nitidez, o que podia
     // ultrapassar cinco minutos. Aqui preservamos os quadros originais e
     // geramos o contêiner 1080p com o menor custo possível.
-    const videoFilter = "scale=w='if(gt(iw,ih),1920,1080)':h='if(gt(iw,ih),1080,1920)':flags=fast_bilinear,setsar=1";
+    const videoFilter = "setpts=PTS-STARTPTS,fps=30,scale=w='if(gt(iw,ih),1920,1080)':h='if(gt(iw,ih),1080,1920)':flags=bilinear,setsar=1";
     await runFfmpeg([
       "-hide_banner", "-loglevel", "error", "-y",
       "-threads", "1", "-filter_threads", "1", "-i", inputPath,
       "-map", "0:v:0", "-map", "0:a?", "-vf", videoFilter,
-      "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22",
+      "-c:v", "libx264", "-preset", "ultrafast",
+      "-b:v", "7M", "-maxrate", "8M", "-bufsize", "14M",
       "-profile:v", "high", "-level", "4.1", "-pix_fmt", "yuv420p",
+      "-r", "30", "-fps_mode", "cfr",
       "-c:a", "copy", "-movflags", "+faststart", outputPath
     ]);
 
     const stamp = new Date().toISOString().replaceAll(":", "-").replace(/\.\d{3}Z$/, "");
     res.setHeader("X-JB-Output", "1080p-upscaled");
+    res.setHeader("X-JB-Frame-Rate", "30");
+    res.setHeader("X-JB-Video-Bitrate", "7000000");
     res.download(outputPath, `JB-Replay-${stamp}-1080p.mp4`, async () => {
       await fs.rm(workDir, { recursive: true, force: true });
     });
