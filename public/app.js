@@ -25,7 +25,7 @@ const state = {
   boundaryResolver: null,
   activeLens: "",
   cameraDiagnostic: "A lente será confirmada quando a câmera iniciar.",
-  resolutionDiagnostic: "A resolução real será confirmada quando a câmera iniciar.",
+  resolutionDiagnostic: "O replay será salvo sem ampliação. Depois, você poderá gerar uma cópia em 1080p.",
   settings: loadSettings(),
   controllerKey: getControllerKey(),
   db: null
@@ -84,16 +84,13 @@ async function startCamera() {
   }
 
   try {
-    const width = state.settings.quality === 1080 ? 1920 : 1280;
-    const height = state.settings.quality === 1080 ? 1080 : 720;
-
     let camera = await resolveCamera(state.settings.camera);
-    const capture = await openCameraStream(camera, width, height, state.settings.audio);
+    const capture = await openCameraStream(camera, state.settings.audio);
     state.stream = capture.stream;
     if (!capture.usedSelectedCamera) camera = null;
 
     const selectedLens = await applyLensPreference(state.stream, state.settings.camera, camera);
-    const resolution = await forceTrackResolution(state.stream.getVideoTracks()[0], width, height);
+    const resolution = reportCaptureResolution(state.stream.getVideoTracks()[0]);
 
     elements.video.srcObject = state.stream;
     await elements.video.play();
@@ -111,48 +108,32 @@ async function startCamera() {
   }
 }
 
-async function openCameraStream(camera, width, height, audio) {
-  const supports = navigator.mediaDevices.getSupportedConstraints?.() || {};
+async function openCameraStream(camera, audio) {
   const source = camera?.deviceId
     ? { deviceId: { exact: camera.deviceId } }
     : { facingMode: { ideal: "environment" } };
-  const common = {
+  const constraints = {
     ...source,
-    frameRate: { min: 25, ideal: 30, max: 30 },
+    width: { ideal: 1280 },
+    height: { ideal: 720 },
+    frameRate: { ideal: 30, max: 30 },
     aspectRatio: { ideal: 16 / 9 }
   };
-  const nativeSize = supports.resizeMode ? { resizeMode: { ideal: "none" } } : {};
-  const attempts = [
-    { ...common, ...nativeSize, width: { exact: width }, height: { exact: height } },
-    { ...common, ...nativeSize, width: { min: Math.min(1280, width), ideal: width }, height: { min: Math.min(720, height), ideal: height } },
-    { ...common, width: { ideal: width }, height: { ideal: height } }
-  ];
 
-  for (const constraints of attempts) {
-    try {
-      return {
-        stream: await navigator.mediaDevices.getUserMedia({ video: constraints, audio }),
-        usedSelectedCamera: Boolean(camera?.deviceId)
-      };
-    } catch (error) {
-      if (error.name !== "OverconstrainedError" && error.name !== "NotFoundError") throw error;
-    }
+  try {
+    return {
+      stream: await navigator.mediaDevices.getUserMedia({ video: constraints, audio }),
+      usedSelectedCamera: Boolean(camera?.deviceId)
+    };
+  } catch (error) {
+    if (!camera?.deviceId) throw error;
+    delete constraints.deviceId;
+    constraints.facingMode = { ideal: "environment" };
+    return {
+      stream: await navigator.mediaDevices.getUserMedia({ video: constraints, audio }),
+      usedSelectedCamera: false
+    };
   }
-
-  // Último recurso: mantém o aplicativo funcionando mesmo que o Safari
-  // recuse a combinação entre lente e resolução solicitada.
-  return {
-    stream: await navigator.mediaDevices.getUserMedia({
-      video: {
-        facingMode: { ideal: "environment" },
-        width: { ideal: width },
-        height: { ideal: height },
-        frameRate: { ideal: 30, max: 30 }
-      },
-      audio
-    }),
-    usedSelectedCamera: false
-  };
 }
 
 function stopCamera() {
@@ -261,53 +242,11 @@ function updateCameraDiagnostic(message) {
   if (elements.cameraDiagnostic) elements.cameraDiagnostic.textContent = message;
 }
 
-async function forceTrackResolution(track, width, height) {
-  const supports = navigator.mediaDevices.getSupportedConstraints?.() || {};
-  const zoom = track.getSettings?.().zoom;
-  const preserveZoom = Number.isFinite(Number(zoom)) ? [{ zoom: Number(zoom) }] : undefined;
-  const frameRate = { min: 25, ideal: 30, max: 30 };
-  const attempts = [
-    {
-      width: { exact: width }, height: { exact: height },
-      aspectRatio: { exact: 16 / 9 }, frameRate,
-      ...(supports.resizeMode ? { resizeMode: { exact: "none" } } : {}),
-      ...(preserveZoom ? { advanced: preserveZoom } : {})
-    },
-    {
-      width: { exact: width }, height: { exact: height },
-      aspectRatio: { ideal: 16 / 9 }, frameRate,
-      ...(preserveZoom ? { advanced: preserveZoom } : {})
-    },
-    {
-      width: { min: Math.min(1280, width), ideal: width },
-      height: { min: Math.min(720, height), ideal: height },
-      aspectRatio: { ideal: 16 / 9 }, frameRate,
-      ...(supports.resizeMode ? { resizeMode: { ideal: "none" } } : {}),
-      ...(preserveZoom ? { advanced: preserveZoom } : {})
-    }
-  ];
-
-  for (const constraints of attempts) {
-    try {
-      await track.applyConstraints(constraints);
-      const actual = track.getSettings?.() || {};
-      const longSide = Math.max(Number(actual.width) || 0, Number(actual.height) || 0);
-      const shortSide = Math.min(Number(actual.width) || 0, Number(actual.height) || 0);
-      if (longSide >= width && shortSide >= height) {
-        const message = `Resolução ativa: ${actual.width} × ${actual.height} • ${Math.round(actual.frameRate || 30)} fps`;
-        updateResolutionDiagnostic(message);
-        return { label: width === 1920 ? "1080p" : "720p", settings: actual };
-      }
-    } catch (error) {
-      if (error.name !== "OverconstrainedError") console.warn("Resolution constraint failed", error);
-    }
-  }
-
+function reportCaptureResolution(track) {
   const actual = track.getSettings?.() || {};
-  const message = `Safari limitou para ${actual.width || "?"} × ${actual.height || "?"} • solicitado ${width} × ${height}`;
+  const message = `Captura original: ${actual.width || "automática"} × ${actual.height || "automática"} • ${Math.round(actual.frameRate || 30)} fps`;
   updateResolutionDiagnostic(message);
-  showToast("Confira nas configurações a resolução realmente aplicada");
-  return { label: `${Math.max(actual.width || 0, actual.height || 0)}p real`, settings: actual };
+  return { label: "original", settings: actual };
 }
 
 function updateResolutionDiagnostic(message) {
@@ -319,11 +258,7 @@ function startRecorder() {
   if (!state.running || !state.stream) return;
   const mimeType = chooseMimeType();
 
-  const recorderOptions = {
-    ...(mimeType ? { mimeType } : {}),
-    videoBitsPerSecond: state.settings.quality === 1080 ? 10_000_000 : 5_000_000,
-    ...(state.settings.audio ? { audioBitsPerSecond: 192_000 } : {})
-  };
+  const recorderOptions = mimeType ? { mimeType } : undefined;
 
   try {
     state.recorder = new MediaRecorder(state.stream, recorderOptions);
@@ -533,13 +468,15 @@ async function renderGallery() {
     card.innerHTML = `
       <video src="${url}" controls playsinline preload="metadata"></video>
       <div class="replay-meta">
-        <div><strong>Replay ${replays.length - index}</strong><small>${date} · ${replay.duration}s</small></div>
+        <div><strong>Replay ${replays.length - index}</strong><small>${date} · ${replay.duration}s · ${replay.quality === "1080p" ? "1080p ampliado" : "Original"}</small></div>
         <div class="replay-actions">
+          ${replay.quality === "1080p" ? "" : '<button data-action="upscale" class="upscale-action" title="Gerar e exportar em 1080p">1080p</button>'}
           <button data-action="share" title="Compartilhar">↗</button>
           <button data-action="delete" title="Excluir">⌫</button>
         </div>
       </div>`;
     card.querySelector('[data-action="share"]').addEventListener("click", () => shareReplay(replay));
+    card.querySelector('[data-action="upscale"]')?.addEventListener("click", event => upscaleReplay(replay, event.currentTarget));
     card.querySelector('[data-action="delete"]').addEventListener("click", async () => {
       await deleteReplay(replay.id);
       URL.revokeObjectURL(url);
@@ -549,8 +486,67 @@ async function renderGallery() {
   });
 }
 
+async function upscaleReplay(replay, button) {
+  button.disabled = true;
+  const originalLabel = button.textContent;
+  button.textContent = "…";
+  showToast("Gerando versão 1080p…");
+
+  try {
+    const allReplays = await getReplays();
+    let enhanced = allReplays.find(item => item.quality === "1080p" && item.sourceId === replay.id);
+
+    if (!enhanced) {
+      const form = new FormData();
+      form.append("video", replay.blob, "JB-Replay-original.mp4");
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 180000);
+      let response;
+      try {
+        response = await fetch("/api/upscale", { method: "POST", body: form, signal: controller.signal });
+      } finally {
+        clearTimeout(timeout);
+      }
+
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.message || "Não foi possível gerar o vídeo 1080p.");
+      }
+
+      const blob = await response.blob();
+      if (!blob.size) throw new Error("O vídeo 1080p ficou vazio.");
+      enhanced = {
+        id: crypto.randomUUID(),
+        sourceId: replay.id,
+        createdAt: Date.now(),
+        duration: replay.duration,
+        quality: "1080p",
+        blob
+      };
+      await saveReplay(enhanced);
+      await renderGallery();
+    }
+
+    showToast("1080p pronto — escolha Salvar Vídeo");
+    try {
+      await shareReplay(enhanced);
+    } catch (shareError) {
+      if (shareError.name !== "AbortError") throw shareError;
+    }
+  } catch (error) {
+    console.error(error);
+    showToast(error.name === "AbortError" ? "A conversão demorou demais" : (error.message || "Falha ao gerar 1080p"));
+  } finally {
+    if (button.isConnected) {
+      button.disabled = false;
+      button.textContent = originalLabel;
+    }
+  }
+}
+
 async function shareReplay(replay) {
-  const file = new File([replay.blob], `JB-Replay-${formatFileDate(replay.createdAt)}.mp4`, { type: "video/mp4" });
+  const suffix = replay.quality === "1080p" ? "-1080p" : "";
+  const file = new File([replay.blob], `JB-Replay-${formatFileDate(replay.createdAt)}${suffix}.mp4`, { type: "video/mp4" });
   if (navigator.canShare?.({ files: [file] })) {
     await navigator.share({ title: "JB Replay", files: [file] });
   } else {
@@ -594,9 +590,9 @@ function saveSettings() {
 
 function loadSettings() {
   try {
-    return { duration: 40, quality: 1080, camera: "auto", orientation: "landscape", audio: true, ...JSON.parse(localStorage.getItem("jb-replay-settings")) };
+    return { duration: 40, quality: 720, camera: "auto", orientation: "landscape", audio: true, ...JSON.parse(localStorage.getItem("jb-replay-settings")), quality: 720 };
   } catch {
-    return { duration: 40, quality: 1080, camera: "auto", orientation: "landscape", audio: true };
+    return { duration: 40, quality: 720, camera: "auto", orientation: "landscape", audio: true };
   }
 }
 
