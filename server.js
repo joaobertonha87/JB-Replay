@@ -138,13 +138,18 @@ app.post("/api/upscale", upload.single("video"), async (req, res) => {
 
   try {
     await fs.rename(req.file.path, inputPath);
-    const videoFilter = "hqdn3d=1.0:1.0:3:3,scale=w='if(gt(iw,ih),1920,1080)':h='if(gt(iw,ih),1080,1920)':flags=lanczos,unsharp=5:5:0.4:3:3:0.1,setsar=1";
+    // Ampliação leve para caber no plano gratuito do Render. A versão
+    // anterior combinava redução de ruído, Lanczos e nitidez, o que podia
+    // ultrapassar cinco minutos. Aqui preservamos os quadros originais e
+    // geramos o contêiner 1080p com o menor custo possível.
+    const videoFilter = "scale=w='if(gt(iw,ih),1920,1080)':h='if(gt(iw,ih),1080,1920)':flags=fast_bilinear,setsar=1";
     await runFfmpeg([
-      "-hide_banner", "-loglevel", "error", "-y", "-i", inputPath,
+      "-hide_banner", "-loglevel", "error", "-y",
+      "-threads", "1", "-filter_threads", "1", "-i", inputPath,
       "-map", "0:v:0", "-map", "0:a?", "-vf", videoFilter,
-      "-c:v", "libx264", "-preset", "ultrafast", "-crf", "19",
+      "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22",
       "-profile:v", "high", "-level", "4.1", "-pix_fmt", "yuv420p",
-      "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", outputPath
+      "-c:a", "copy", "-movflags", "+faststart", outputPath
     ]);
 
     const stamp = new Date().toISOString().replaceAll(":", "-").replace(/\.\d{3}Z$/, "");
