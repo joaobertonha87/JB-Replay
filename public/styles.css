@@ -13,6 +13,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text); font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif; }
 body { min-height: 100dvh; background: radial-gradient(circle at 50% -10%, rgba(184,255,49,.12), transparent 35%), var(--bg); }
 button, select { font: inherit; }
@@ -79,13 +80,17 @@ h1, h2, p { margin: 0; }
 .gallery { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 12px; }
 .replay-card { overflow: hidden; border: 1px solid var(--line); border-radius: 18px; background: var(--panel); }
 .replay-card video { width: 100%; aspect-ratio: 16/9; display: block; object-fit: cover; background: #000; }
+.camera-card video.mirrored { transform: scaleX(-1); }
 .replay-meta { padding: 10px; display: flex; align-items: center; justify-content: space-between; }
 .replay-meta div { display: flex; flex-direction: column; }
 .replay-meta strong { font-size: 12px; }
 .replay-meta small { color: var(--muted); font-size: 10px; }
 .replay-actions { display: flex; gap: 5px; }
 .replay-actions button { width: 31px; height: 31px; border: 1px solid var(--line); border-radius: 10px; background: #171d19; color: var(--text); }
-.replay-actions .upscale-action { width: auto; min-width: 54px; padding: 0 8px; color: var(--lime); font-size: 9px; font-weight: 900; }
+.replay-actions .upscale-action { width: auto; min-width: 72px; padding: 0 10px; color: var(--lime); font-size: 9px; font-weight: 900; white-space: nowrap; }
+.replay-actions .upscale-action.processing { min-width: 104px; color: #fff; border-color: var(--lime); }
+.replay-actions .ready-action { color: #050805; background: var(--lime); }
+.replay-card.new-1080p { outline: 2px solid var(--lime); box-shadow: 0 0 28px rgba(180,255,45,.28); }
 .replay-actions button:disabled { opacity: .55; }
 
 dialog { width: min(100% - 20px, 520px); padding: 0; border: 0; border-radius: 28px; color: var(--text); background: transparent; }

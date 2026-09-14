@@ -109,9 +109,10 @@ async function startCamera() {
 }
 
 async function openCameraStream(camera, audio) {
+  const wantsFront = state.settings.camera === "front";
   const source = camera?.deviceId
     ? { deviceId: { exact: camera.deviceId } }
-    : { facingMode: { ideal: "environment" } };
+    : { facingMode: { ideal: wantsFront ? "user" : "environment" } };
   const constraints = {
     ...source,
     width: { ideal: 1280 },
@@ -128,7 +129,7 @@ async function openCameraStream(camera, audio) {
   } catch (error) {
     if (!camera?.deviceId) throw error;
     delete constraints.deviceId;
-    constraints.facingMode = { ideal: "environment" };
+    constraints.facingMode = { ideal: wantsFront ? "user" : "environment" };
     return {
       stream: await navigator.mediaDevices.getUserMedia({ video: constraints, audio }),
       usedSelectedCamera: false
@@ -177,9 +178,14 @@ async function resolveCamera(mode) {
   const isFront = label => /front|frontal|face|user/i.test(label);
   const isUltra = label => /ultra|0[.,]5|0\.5/i.test(label);
   const rear = cameras.filter(device => !isFront(device.label));
+  const front = cameras.filter(device => isFront(device.label));
   const choice = (device, strategy) => device
     ? { deviceId: device.deviceId, label: device.label, strategy }
     : null;
+
+  if (mode === "front") {
+    return choice(front[0] || null, "front");
+  }
 
   if (mode === "ultrawide") {
     const physicalUltra = rear.find(device => isUltra(device.label));
@@ -199,11 +205,18 @@ async function resolveCamera(mode) {
 }
 
 async function applyLensPreference(stream, mode, matchedCamera) {
+  elements.video.classList.remove("mirrored");
   if (mode === "auto") {
     updateCameraDiagnostic("Câmera traseira escolhida automaticamente pelo iPhone.");
     return "automática";
   }
   const track = stream.getVideoTracks()[0];
+
+  if (mode === "front") {
+    updateCameraDiagnostic(`Câmera frontal selecionada${matchedCamera?.label ? `: ${matchedCamera.label}` : "."}`);
+    elements.video.classList.add("mirrored");
+    return "frontal";
+  }
 
   if (mode === "ultrawide" && matchedCamera?.strategy === "physical-ultrawide") {
     updateCameraDiagnostic(`Ultra-angular física selecionada${matchedCamera.label ? `: ${matchedCamera.label}` : "."}`);
@@ -464,15 +477,18 @@ async function renderGallery() {
     const url = URL.createObjectURL(replay.blob);
     const card = document.createElement("article");
     card.className = "replay-card";
+    card.dataset.replayId = replay.id;
     const date = new Intl.DateTimeFormat("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }).format(replay.createdAt);
     card.innerHTML = `
       <video src="${url}" controls playsinline preload="metadata"></video>
       <div class="replay-meta">
         <div><strong>Replay ${replays.length - index}</strong><small>${date} · ${replay.duration}s · ${replay.quality === "1080p" ? "1080p ampliado" : "Original"}</small></div>
         <div class="replay-actions">
-          ${replay.quality === "1080p" ? "" : '<button data-action="upscale" class="upscale-action" title="Gerar e exportar em 1080p">1080p</button>'}
-          <button data-action="share" title="Compartilhar">↗</button>
-          <button data-action="delete" title="Excluir">⌫</button>
+          ${replay.quality === "1080p"
+            ? '<button type="button" data-action="share" class="upscale-action ready-action" title="Salvar o vídeo 1080p no iPhone">Salvar 1080p</button>'
+            : '<button type="button" data-action="upscale" class="upscale-action" title="Gerar uma nova cópia ampliada para 1080p">Gerar 1080p</button>'}
+          ${replay.quality === "1080p" ? "" : '<button type="button" data-action="share" title="Compartilhar original">↗</button>'}
+          <button type="button" data-action="delete" title="Excluir">⌫</button>
         </div>
       </div>`;
     card.querySelector('[data-action="share"]').addEventListener("click", () => shareReplay(replay));
@@ -489,8 +505,16 @@ async function renderGallery() {
 async function upscaleReplay(replay, button) {
   button.disabled = true;
   const originalLabel = button.textContent;
-  button.textContent = "…";
-  showToast("Gerando versão 1080p…");
+  let elapsedSeconds = 0;
+  button.textContent = "Enviando…";
+  button.classList.add("processing");
+  elements.cameraStatus.textContent = "Preparando cópia 1080p…";
+  showToast("1080p iniciado — aguarde nesta tela");
+  const progressTimer = setInterval(() => {
+    elapsedSeconds += 1;
+    button.textContent = `Processando ${elapsedSeconds}s`;
+    elements.cameraStatus.textContent = `Gerando 1080p • ${elapsedSeconds}s`;
+  }, 1000);
 
   try {
     const allReplays = await getReplays();
@@ -500,7 +524,7 @@ async function upscaleReplay(replay, button) {
       const form = new FormData();
       form.append("video", replay.blob, "JB-Replay-original.mp4");
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 180000);
+      const timeout = setTimeout(() => controller.abort(), 300000);
       let response;
       try {
         response = await fetch("/api/upscale", { method: "POST", body: form, signal: controller.signal });
@@ -515,33 +539,74 @@ async function upscaleReplay(replay, button) {
 
       const blob = await response.blob();
       if (!blob.size) throw new Error("O vídeo 1080p ficou vazio.");
+      const dimensions = await readVideoDimensions(blob);
+      if (Math.max(dimensions.width, dimensions.height) < 1920 || Math.min(dimensions.width, dimensions.height) < 1080) {
+        throw new Error(`O servidor devolveu ${dimensions.width}×${dimensions.height}, não 1080p.`);
+      }
       enhanced = {
         id: crypto.randomUUID(),
         sourceId: replay.id,
         createdAt: Date.now(),
         duration: replay.duration,
         quality: "1080p",
+        width: dimensions.width,
+        height: dimensions.height,
         blob
       };
       await saveReplay(enhanced);
       await renderGallery();
     }
 
-    showToast("1080p pronto — escolha Salvar Vídeo");
-    try {
-      await shareReplay(enhanced);
-    } catch (shareError) {
-      if (shareError.name !== "AbortError") throw shareError;
-    }
+    showToast("1080p pronto! Toque em Salvar 1080p");
+    restoreCameraStatus();
+    scrollToEnhancedReplay(enhanced.id);
   } catch (error) {
     console.error(error);
-    showToast(error.name === "AbortError" ? "A conversão demorou demais" : (error.message || "Falha ao gerar 1080p"));
+    showToast(error.name === "AbortError" ? "A conversão excedeu 5 minutos" : (error.message || "Falha ao gerar 1080p"));
+    restoreCameraStatus();
   } finally {
+    clearInterval(progressTimer);
     if (button.isConnected) {
       button.disabled = false;
       button.textContent = originalLabel;
+      button.classList.remove("processing");
     }
   }
+}
+
+function readVideoDimensions(blob) {
+  return new Promise((resolve, reject) => {
+    const video = document.createElement("video");
+    const url = URL.createObjectURL(blob);
+    video.preload = "metadata";
+    video.onloadedmetadata = () => {
+      const dimensions = { width: video.videoWidth, height: video.videoHeight };
+      URL.revokeObjectURL(url);
+      resolve(dimensions);
+    };
+    video.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("O iPhone não conseguiu validar o vídeo 1080p."));
+    };
+    video.src = url;
+  });
+}
+
+function restoreCameraStatus() {
+  elements.cameraStatus.textContent = state.running
+    ? `Buffer ativo${state.activeLens ? ` • ${state.activeLens}` : ""}`
+    : "Em espera";
+}
+
+function scrollToEnhancedReplay(id) {
+  requestAnimationFrame(() => {
+    const card = [...elements.gallery.querySelectorAll(".replay-card")]
+      .find(item => item.dataset.replayId === id);
+    if (!card) return;
+    card.classList.add("new-1080p");
+    card.scrollIntoView({ behavior: "smooth", block: "center" });
+    setTimeout(() => card.classList.remove("new-1080p"), 3500);
+  });
 }
 
 async function shareReplay(replay) {
