@@ -94,6 +94,7 @@ dialog::backdrop { background: rgba(0,0,0,.7); backdrop-filter: blur(7px); }
 .sheet-title button { width: 36px; height: 36px; border: 1px solid var(--line); border-radius: 12px; background: #171d19; color: var(--text); font-size: 22px; }
 .sheet label { display: flex; flex-direction: column; gap: 8px; margin: 14px 0; color: #cdd4ce; font-size: 12px; font-weight: 750; }
 .sheet select { width: 100%; height: 48px; padding: 0 13px; border: 1px solid var(--line); border-radius: 14px; background: #171d19; color: var(--text); }
+.camera-diagnostic { color: var(--muted); font-size: 10px; font-weight: 550; line-height: 1.45; }
 .toggle-row { flex-direction: row !important; justify-content: space-between; align-items: center; padding: 4px 0; }
 .toggle-row span { display: flex; flex-direction: column; gap: 3px; }
 .toggle-row small { color: var(--muted); font-weight: 500; }

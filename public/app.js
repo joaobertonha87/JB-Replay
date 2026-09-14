@@ -9,6 +9,7 @@ const elements = {
   bufferLabel: $("#bufferLabel"), buttonSeconds: $("#buttonSeconds"), toast: $("#toast"),
   gallery: $("#gallery"), emptyGallery: $("#emptyGallery"), replayCount: $("#replayCount"),
   durationSelect: $("#durationSelect"), qualitySelect: $("#qualitySelect"), cameraSelect: $("#cameraSelect"),
+  cameraDiagnostic: $("#cameraDiagnostic"),
   orientationSelect: $("#orientationSelect"), audioToggle: $("#audioToggle"), saveSettingsButton: $("#saveSettingsButton")
 };
 
@@ -23,6 +24,7 @@ const state = {
   chunkChain: Promise.resolve(),
   boundaryResolver: null,
   activeLens: "",
+  cameraDiagnostic: "A lente será confirmada quando a câmera iniciar.",
   settings: loadSettings(),
   controllerKey: getControllerKey(),
   db: null
@@ -174,38 +176,69 @@ async function resolveCamera(mode) {
   const isFront = label => /front|frontal|face|user/i.test(label);
   const isUltra = label => /ultra|0[.,]5|0\.5/i.test(label);
   const rear = cameras.filter(device => !isFront(device.label));
+  const choice = (device, strategy) => device
+    ? { deviceId: device.deviceId, label: device.label, strategy }
+    : null;
 
   if (mode === "ultrawide") {
-    return rear.find(device => isUltra(device.label)) || null;
+    const physicalUltra = rear.find(device => isUltra(device.label));
+    if (physicalUltra) return choice(physicalUltra, "physical-ultrawide");
+
+    // iPhones Pro podem expor o conjunto de lentes como uma única câmera
+    // virtual (Dual/Triple/Back Camera). Nela, o zoom interno mínimo seleciona
+    // o maior campo de visão disponível.
+    const virtualRear = rear.find(device => /triple|dual|virtual/i.test(device.label))
+      || rear.find(device => /back|rear|traseira|wide/i.test(device.label));
+    return choice(virtualRear, "virtual-rear");
   }
 
-  return rear.find(device => !isUltra(device.label) && /back|rear|traseira|principal|main|wide/i.test(device.label))
+  return choice(rear.find(device => !isUltra(device.label) && /back|rear|traseira|principal|main|wide/i.test(device.label))
     || rear.find(device => !isUltra(device.label))
-    || null;
+    || null, "main");
 }
 
 async function applyLensPreference(stream, mode, matchedCamera) {
-  if (mode === "auto") return "automática";
+  if (mode === "auto") {
+    updateCameraDiagnostic("Câmera traseira escolhida automaticamente pelo iPhone.");
+    return "automática";
+  }
   const track = stream.getVideoTracks()[0];
 
-  if (mode === "ultrawide" && !matchedCamera) {
-    // Alguns modelos expõem um dispositivo traseiro virtual e controlam as
-    // lentes pelo zoom. Quando houver zoom abaixo de 1, ele corresponde ao
-    // campo de visão ultra-angular.
+  if (mode === "ultrawide" && matchedCamera?.strategy === "physical-ultrawide") {
+    updateCameraDiagnostic(`Ultra-angular física selecionada${matchedCamera.label ? `: ${matchedCamera.label}` : "."}`);
+    return "0,5×";
+  }
+
+  if (mode === "ultrawide") {
+    // Na câmera virtual dos iPhones Pro, o valor mínimo costuma ser 1, embora
+    // corresponda à lente mostrada como 0,5× no aplicativo Câmera. A V1.3
+    // exigia incorretamente um valor menor que 1.
     try {
       const capabilities = track.getCapabilities?.() || {};
-      if (capabilities.zoom && Number(capabilities.zoom.min) < 1) {
-        await track.applyConstraints({ advanced: [{ zoom: capabilities.zoom.min }] });
+      const minimumZoom = Number(capabilities.zoom?.min);
+      const maximumZoom = Number(capabilities.zoom?.max);
+      if (Number.isFinite(minimumZoom) && Number.isFinite(maximumZoom) && maximumZoom > minimumZoom) {
+        await track.applyConstraints({ advanced: [{ zoom: minimumZoom }] });
+        await delay(180);
+        const appliedZoom = track.getSettings?.().zoom;
+        updateCameraDiagnostic(`Ultra-angular solicitada • zoom interno ${appliedZoom ?? minimumZoom} • faixa ${minimumZoom}–${maximumZoom}`);
         return "0,5×";
       }
     } catch (error) {
       console.warn("Ultra-wide zoom unavailable", error);
     }
-    showToast("O Safari não expôs a câmera 0,5×; usando a traseira disponível");
+    updateCameraDiagnostic("O Safari expôs somente a câmera traseira 1× e não ofereceu controle de lente.");
+    showToast("Safari manteve a câmera 1×; veja o diagnóstico nas configurações");
     return "traseira";
   }
 
-  return mode === "ultrawide" ? "0,5×" : "1×";
+  updateCameraDiagnostic(`Câmera principal selecionada${matchedCamera?.label ? `: ${matchedCamera.label}` : "."}`);
+  return "1×";
+}
+
+function updateCameraDiagnostic(message) {
+  state.cameraDiagnostic = message;
+  if (elements.cameraDiagnostic) elements.cameraDiagnostic.textContent = message;
 }
 
 function startRecorder() {
@@ -491,6 +524,7 @@ function applySettingsToUI() {
   elements.durationSelect.value = state.settings.duration;
   elements.qualitySelect.value = state.settings.quality;
   elements.cameraSelect.value = state.settings.camera || "auto";
+  updateCameraDiagnostic(state.cameraDiagnostic);
   elements.orientationSelect.value = state.settings.orientation;
   elements.audioToggle.checked = state.settings.audio;
   elements.bufferLabel.textContent = `${state.settings.duration}s`;
