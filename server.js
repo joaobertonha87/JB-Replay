@@ -17,7 +17,9 @@ const port = Number(process.env.PORT || 3000);
 const controllers = new Map();
 
 const upload = multer({
-  storage: multer.memoryStorage(),
+  // Grava os segmentos no disco temporário para não ocupar toda a memória do
+  // serviço durante uploads em 1080p.
+  dest: os.tmpdir(),
   limits: { files: 40, fileSize: 40 * 1024 * 1024, fieldSize: 1024 * 1024 }
 });
 
@@ -56,6 +58,7 @@ app.post("/api/render", upload.array("segments", 40), async (req, res) => {
   const jobId = crypto.randomUUID();
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), `jb-replay-${jobId}-`));
   const outputPath = path.join(workDir, "JB-Replay.mp4");
+  const uploadedPaths = req.files.map(file => file.path).filter(Boolean);
 
   try {
     const inputPaths = [];
@@ -63,7 +66,7 @@ app.post("/api/render", upload.array("segments", 40), async (req, res) => {
       const file = req.files[index];
       const ext = file.mimetype.includes("webm") ? "webm" : "mp4";
       const inputPath = path.join(workDir, `segment-${String(index).padStart(3, "0")}.${ext}`);
-      await fs.writeFile(inputPath, file.buffer);
+      await fs.rename(file.path, inputPath);
       inputPaths.push(inputPath);
     }
 
@@ -71,23 +74,48 @@ app.post("/api/render", upload.array("segments", 40), async (req, res) => {
     const list = inputPaths.map(file => `file '${file.replaceAll("'", "'\\''")}'`).join("\n");
     await fs.writeFile(listPath, list);
 
-    await runFfmpeg([
-      "-hide_banner", "-loglevel", "error", "-y",
-      "-f", "concat", "-safe", "0", "-i", listPath,
-      "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
-      "-c:a", "aac", "-b:a", "128k",
-      "-movflags", "+faststart", outputPath
-    ]);
+    let renderMode = "copy";
+    try {
+      // Caminho rápido: apenas une os trechos H.264/AAC, sem recodificar cada
+      // quadro. Em iPhone esse costuma ser o formato nativo do MediaRecorder.
+      await runFfmpeg([
+        "-hide_banner", "-loglevel", "error", "-y",
+        "-f", "concat", "-safe", "0", "-i", listPath,
+        "-map", "0:v:0", "-map", "0:a?",
+        "-c", "copy", "-movflags", "+faststart", outputPath
+      ]);
+    } catch {
+      // Compatibilidade para aparelhos/navegadores que entregarem WebM ou
+      // segmentos que precisem ser normalizados.
+      renderMode = "transcode";
+      await runFfmpeg([
+        "-hide_banner", "-loglevel", "error", "-y",
+        "-f", "concat", "-safe", "0", "-i", listPath,
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+        "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart", outputPath
+      ]);
+    }
 
     const stamp = new Date().toISOString().replaceAll(":", "-").replace(/\.\d{3}Z$/, "");
+    res.setHeader("X-JB-Render-Mode", renderMode);
     res.download(outputPath, `JB-Replay-${stamp}.mp4`, async () => {
       await fs.rm(workDir, { recursive: true, force: true });
     });
   } catch (error) {
     await fs.rm(workDir, { recursive: true, force: true });
+    await Promise.allSettled(uploadedPaths.map(file => fs.rm(file, { force: true })));
     console.error("Replay render failed", error);
     res.status(500).json({ ok: false, message: "Não foi possível montar o replay." });
   }
+});
+
+app.use((error, _req, res, _next) => {
+  console.error("Upload failed", error);
+  if (error instanceof multer.MulterError && error.code === "LIMIT_FILE_SIZE") {
+    return res.status(413).json({ ok: false, message: "Trecho muito grande. Selecione 720p e tente novamente." });
+  }
+  return res.status(500).json({ ok: false, message: "Falha ao receber os trechos do replay." });
 });
 
 io.on("connection", socket => {

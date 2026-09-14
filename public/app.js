@@ -197,18 +197,21 @@ async function requestReplay(source) {
   showToast(source === "watch" ? "Comando recebido do relógio" : "Replay solicitado");
 
   try {
-    await delay(2500);
+    // Fecha imediatamente o segmento atual. O lance salvo termina no momento
+    // do toque, sem adicionar segundos ocultos ao tempo escolhido.
     await forceBoundary();
     const end = Date.now();
-    const start = end - ((state.settings.duration + 3) * 1000);
+    const start = end - (state.settings.duration * 1000);
     const selected = state.segments.filter(segment => segment.endedAt >= start && segment.startedAt <= end);
     if (!selected.length) throw new Error("Ainda não há vídeo suficiente.");
 
-    const replayBlob = await renderReplay(selected);
+    elements.cameraStatus.textContent = "Enviando replay…";
+    const replayBlob = await renderReplay(selected, state.settings.duration);
+    elements.cameraStatus.textContent = "Salvando no iPhone…";
     const replay = {
       id: crypto.randomUUID(),
       createdAt: Date.now(),
-      duration: Math.min(state.settings.duration + 3, Math.round((selected.at(-1).endedAt - selected[0].startedAt) / 1000)),
+      duration: Math.min(state.settings.duration, Math.round((selected.at(-1).endedAt - selected[0].startedAt) / 1000)),
       blob: replayBlob
     };
     await saveReplay(replay);
@@ -224,15 +227,49 @@ async function requestReplay(source) {
   }
 }
 
-async function renderReplay(segments) {
-  const form = new FormData();
-  segments.forEach((segment, index) => {
-    const extension = segment.blob.type.includes("webm") ? "webm" : "mp4";
-    form.append("segments", segment.blob, `segment-${String(index).padStart(3, "0")}.${extension}`);
-  });
-  const response = await fetch("/api/render", { method: "POST", body: form });
-  if (!response.ok) throw new Error("Falha ao montar o vídeo. Tente novamente.");
-  return response.blob();
+async function renderReplay(segments, duration) {
+  let lastError;
+
+  // Uma nova requisição é criada em cada tentativa, pois FormData com vídeos
+  // não deve ser reaproveitado depois de uma falha de rede no Safari.
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const form = new FormData();
+    form.append("duration", String(duration));
+    segments.forEach((segment, index) => {
+      const extension = segment.blob.type.includes("webm") ? "webm" : "mp4";
+      form.append("segments", segment.blob, `segment-${String(index).padStart(3, "0")}.${extension}`);
+    });
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 90000);
+    try {
+      const response = await fetch("/api/render", {
+        method: "POST",
+        body: form,
+        signal: controller.signal
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.message || "Falha ao montar o vídeo.");
+      }
+      const blob = await response.blob();
+      if (!blob.size) throw new Error("O servidor devolveu um vídeo vazio.");
+      return blob;
+    } catch (error) {
+      lastError = error;
+      if (attempt === 1) {
+        elements.cameraStatus.textContent = "Tentando salvar novamente…";
+        await delay(700);
+      }
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  if (lastError?.name === "AbortError") {
+    throw new Error("A conexão demorou demais. Use 720p ou confira o Wi-Fi.");
+  }
+  throw new Error(lastError?.message || "Não foi possível salvar o replay.");
 }
 
 async function renderGallery() {
