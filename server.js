@@ -142,12 +142,13 @@ app.post("/api/upscale", upload.single("video"), async (req, res) => {
     await runFfmpeg([
       "-hide_banner", "-loglevel", "error", "-y", "-i", inputPath,
       "-map", "0:v:0", "-map", "0:a?", "-vf", videoFilter,
-      "-c:v", "libx264", "-preset", "veryfast", "-crf", "19",
+      "-c:v", "libx264", "-preset", "ultrafast", "-crf", "19",
       "-profile:v", "high", "-level", "4.1", "-pix_fmt", "yuv420p",
       "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", outputPath
     ]);
 
     const stamp = new Date().toISOString().replaceAll(":", "-").replace(/\.\d{3}Z$/, "");
+    res.setHeader("X-JB-Output", "1080p-upscaled");
     res.download(outputPath, `JB-Replay-${stamp}-1080p.mp4`, async () => {
       await fs.rm(workDir, { recursive: true, force: true });
     });
