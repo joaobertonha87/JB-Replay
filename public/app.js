@@ -18,8 +18,9 @@ const state = {
   running: false,
   saving: false,
   segments: [],
-  currentSegment: null,
-  segmentTimer: null,
+  initSegment: null,
+  chunkStartedAt: null,
+  chunkChain: Promise.resolve(),
   boundaryResolver: null,
   settings: loadSettings(),
   controllerKey: getControllerKey(),
@@ -96,8 +97,10 @@ async function startCamera() {
     await elements.video.play();
     state.running = true;
     state.segments = [];
+    state.initSegment = null;
+    state.chunkStartedAt = Date.now();
     setCameraUI(true);
-    startSegment();
+    startRecorder();
     registerController();
     showToast("Câmera e replay ativados");
   } catch (error) {
@@ -108,7 +111,6 @@ async function startCamera() {
 
 function stopCamera() {
   state.running = false;
-  clearTimeout(state.segmentTimer);
   if (state.recorder?.state === "recording") state.recorder.stop();
   state.stream?.getTracks().forEach(track => track.stop());
   state.stream = null;
@@ -127,11 +129,9 @@ function setCameraUI(active) {
   elements.watchStatus.textContent = active ? "Conectado e pronto" : "Conectado — inicie a câmera";
 }
 
-function startSegment() {
+function startRecorder() {
   if (!state.running || !state.stream) return;
   const mimeType = chooseMimeType();
-  const chunks = [];
-  const startedAt = Date.now();
 
   try {
     state.recorder = new MediaRecorder(state.stream, mimeType ? { mimeType } : undefined);
@@ -139,40 +139,88 @@ function startSegment() {
     state.recorder = new MediaRecorder(state.stream);
   }
 
-  state.currentSegment = { startedAt };
   state.recorder.ondataavailable = event => {
-    if (event.data?.size) chunks.push(event.data);
+    if (!event.data?.size) return;
+    const endedAt = Date.now();
+    const startedAt = state.chunkStartedAt || endedAt;
+    state.chunkStartedAt = endedAt;
+    state.chunkChain = state.chunkChain
+      .then(() => storeContinuousChunk(event.data, startedAt, endedAt))
+      .finally(() => {
+        state.boundaryResolver?.();
+        state.boundaryResolver = null;
+      });
   };
   state.recorder.onstop = () => {
-    clearTimeout(state.segmentTimer);
-    const endedAt = Date.now();
-    if (chunks.length && (state.running || state.saving)) {
-      state.segments.push({
-        blob: new Blob(chunks, { type: state.recorder.mimeType || mimeType || "video/mp4" }),
-        startedAt,
-        endedAt
-      });
-      trimSegments();
-    }
-    state.currentSegment = null;
     state.boundaryResolver?.();
     state.boundaryResolver = null;
-    if (state.running) startSegment();
   };
-  state.recorder.start();
-  state.segmentTimer = setTimeout(() => stopCurrentSegment(), 4000);
+  state.recorder.onerror = event => {
+    console.error("MediaRecorder error", event.error || event);
+    showToast("A gravação foi interrompida pelo iPhone");
+  };
+
+  // Um único gravador permanece ativo. Os dados são liberados em pequenos
+  // fragmentos, sem parar e reiniciar a câmera entre eles.
+  state.recorder.start(1000);
 }
 
-function stopCurrentSegment() {
-  if (state.recorder?.state === "recording") state.recorder.stop();
+async function storeContinuousChunk(blob, startedAt, endedAt) {
+  const parts = await splitMp4Chunk(blob);
+  if (parts.init?.size && !state.initSegment) state.initSegment = parts.init;
+  if (parts.media?.size) {
+    state.segments.push({ blob: parts.media, startedAt, endedAt });
+    trimSegments();
+  }
 }
 
 function forceBoundary() {
   return new Promise(resolve => {
     if (!state.recorder || state.recorder.state !== "recording") return resolve();
-    state.boundaryResolver = resolve;
-    stopCurrentSegment();
+    const safetyTimer = setTimeout(() => {
+      if (state.boundaryResolver === done) state.boundaryResolver = null;
+      resolve();
+    }, 1800);
+    const done = () => {
+      clearTimeout(safetyTimer);
+      resolve();
+    };
+    state.boundaryResolver = done;
+    state.recorder.requestData();
   });
+}
+
+async function splitMp4Chunk(blob) {
+  if (!blob.type.includes("mp4")) return { init: null, media: blob };
+
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  const view = new DataView(bytes.buffer);
+  let offset = 0;
+
+  while (offset + 8 <= bytes.byteLength) {
+    let size = view.getUint32(offset);
+    const type = String.fromCharCode(...bytes.subarray(offset + 4, offset + 8));
+    let headerSize = 8;
+    if (size === 1 && offset + 16 <= bytes.byteLength) {
+      size = Number(view.getBigUint64(offset + 8));
+      headerSize = 16;
+    } else if (size === 0) {
+      size = bytes.byteLength - offset;
+    }
+    if (size < headerSize || offset + size > bytes.byteLength) break;
+
+    if (type === "moof") {
+      return {
+        init: offset ? blob.slice(0, offset, blob.type) : null,
+        media: blob.slice(offset, blob.size, blob.type)
+      };
+    }
+    offset += size;
+  }
+
+  // Compatibilidade: se o navegador entregar cada trecho como MP4 completo,
+  // ele continua sendo enviado como um segmento independente.
+  return { init: null, media: blob };
 }
 
 function trimSegments() {
@@ -206,7 +254,7 @@ async function requestReplay(source) {
     if (!selected.length) throw new Error("Ainda não há vídeo suficiente.");
 
     elements.cameraStatus.textContent = "Enviando replay…";
-    const replayBlob = await renderReplay(selected, state.settings.duration);
+    const replayBlob = await renderReplay(selected, state.settings.duration, state.initSegment);
     elements.cameraStatus.textContent = "Salvando no iPhone…";
     const replay = {
       id: crypto.randomUUID(),
@@ -227,7 +275,7 @@ async function requestReplay(source) {
   }
 }
 
-async function renderReplay(segments, duration) {
+async function renderReplay(segments, duration, initSegment) {
   let lastError;
 
   // Uma nova requisição é criada em cada tentativa, pois FormData com vídeos
@@ -235,10 +283,15 @@ async function renderReplay(segments, duration) {
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     const form = new FormData();
     form.append("duration", String(duration));
-    segments.forEach((segment, index) => {
-      const extension = segment.blob.type.includes("webm") ? "webm" : "mp4";
-      form.append("segments", segment.blob, `segment-${String(index).padStart(3, "0")}.${extension}`);
-    });
+    if (initSegment) {
+      const recording = new Blob([initSegment, ...segments.map(segment => segment.blob)], { type: "video/mp4" });
+      form.append("segments", recording, "continuous-buffer.mp4");
+    } else {
+      segments.forEach((segment, index) => {
+        const extension = segment.blob.type.includes("webm") ? "webm" : "mp4";
+        form.append("segments", segment.blob, `segment-${String(index).padStart(3, "0")}.${extension}`);
+      });
+    }
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 90000);
