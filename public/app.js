@@ -9,7 +9,7 @@ const elements = {
   bufferLabel: $("#bufferLabel"), buttonSeconds: $("#buttonSeconds"), toast: $("#toast"),
   gallery: $("#gallery"), emptyGallery: $("#emptyGallery"), replayCount: $("#replayCount"),
   durationSelect: $("#durationSelect"), qualitySelect: $("#qualitySelect"), cameraSelect: $("#cameraSelect"),
-  cameraDiagnostic: $("#cameraDiagnostic"),
+  cameraDiagnostic: $("#cameraDiagnostic"), resolutionDiagnostic: $("#resolutionDiagnostic"),
   orientationSelect: $("#orientationSelect"), audioToggle: $("#audioToggle"), saveSettingsButton: $("#saveSettingsButton")
 };
 
@@ -25,6 +25,7 @@ const state = {
   boundaryResolver: null,
   activeLens: "",
   cameraDiagnostic: "A lente será confirmada quando a câmera iniciar.",
+  resolutionDiagnostic: "A resolução real será confirmada quando a câmera iniciar.",
   settings: loadSettings(),
   controllerKey: getControllerKey(),
   db: null
@@ -83,41 +84,16 @@ async function startCamera() {
   }
 
   try {
-    const landscape = state.settings.orientation === "landscape";
     const width = state.settings.quality === 1080 ? 1920 : 1280;
     const height = state.settings.quality === 1080 ? 1080 : 720;
-    const videoConstraints = {
-      facingMode: { ideal: "environment" },
-      width: { ideal: landscape ? width : height },
-      height: { ideal: landscape ? height : width },
-      frameRate: { ideal: 30, max: 30 }
-    };
 
     let camera = await resolveCamera(state.settings.camera);
-    if (camera?.deviceId) {
-      delete videoConstraints.facingMode;
-      videoConstraints.deviceId = { exact: camera.deviceId };
-    }
-
-    try {
-      state.stream = await navigator.mediaDevices.getUserMedia({
-        video: videoConstraints,
-        audio: state.settings.audio
-      });
-    } catch (cameraError) {
-      // Se o Safari invalidar um deviceId após atualização/reinício, retorna à
-      // câmera traseira em vez de impedir o início da gravação.
-      console.warn("Selected camera unavailable; using rear camera", cameraError);
-      camera = null;
-      delete videoConstraints.deviceId;
-      videoConstraints.facingMode = { ideal: "environment" };
-      state.stream = await navigator.mediaDevices.getUserMedia({
-        video: videoConstraints,
-        audio: state.settings.audio
-      });
-    }
+    const capture = await openCameraStream(camera, width, height, state.settings.audio);
+    state.stream = capture.stream;
+    if (!capture.usedSelectedCamera) camera = null;
 
     const selectedLens = await applyLensPreference(state.stream, state.settings.camera, camera);
+    const resolution = await forceTrackResolution(state.stream.getVideoTracks()[0], width, height);
 
     elements.video.srcObject = state.stream;
     await elements.video.play();
@@ -125,7 +101,7 @@ async function startCamera() {
     state.segments = [];
     state.initSegment = null;
     state.chunkStartedAt = Date.now();
-    setCameraUI(true, selectedLens);
+    setCameraUI(true, `${selectedLens} • ${resolution.label}`);
     startRecorder();
     registerController();
     showToast("Câmera e replay ativados");
@@ -133,6 +109,50 @@ async function startCamera() {
     console.error(error);
     showToast("Autorize o acesso à câmera e ao microfone");
   }
+}
+
+async function openCameraStream(camera, width, height, audio) {
+  const supports = navigator.mediaDevices.getSupportedConstraints?.() || {};
+  const source = camera?.deviceId
+    ? { deviceId: { exact: camera.deviceId } }
+    : { facingMode: { ideal: "environment" } };
+  const common = {
+    ...source,
+    frameRate: { min: 25, ideal: 30, max: 30 },
+    aspectRatio: { ideal: 16 / 9 }
+  };
+  const nativeSize = supports.resizeMode ? { resizeMode: { ideal: "none" } } : {};
+  const attempts = [
+    { ...common, ...nativeSize, width: { exact: width }, height: { exact: height } },
+    { ...common, ...nativeSize, width: { min: Math.min(1280, width), ideal: width }, height: { min: Math.min(720, height), ideal: height } },
+    { ...common, width: { ideal: width }, height: { ideal: height } }
+  ];
+
+  for (const constraints of attempts) {
+    try {
+      return {
+        stream: await navigator.mediaDevices.getUserMedia({ video: constraints, audio }),
+        usedSelectedCamera: Boolean(camera?.deviceId)
+      };
+    } catch (error) {
+      if (error.name !== "OverconstrainedError" && error.name !== "NotFoundError") throw error;
+    }
+  }
+
+  // Último recurso: mantém o aplicativo funcionando mesmo que o Safari
+  // recuse a combinação entre lente e resolução solicitada.
+  return {
+    stream: await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: { ideal: "environment" },
+        width: { ideal: width },
+        height: { ideal: height },
+        frameRate: { ideal: 30, max: 30 }
+      },
+      audio
+    }),
+    usedSelectedCamera: false
+  };
 }
 
 function stopCamera() {
@@ -241,12 +261,72 @@ function updateCameraDiagnostic(message) {
   if (elements.cameraDiagnostic) elements.cameraDiagnostic.textContent = message;
 }
 
+async function forceTrackResolution(track, width, height) {
+  const supports = navigator.mediaDevices.getSupportedConstraints?.() || {};
+  const zoom = track.getSettings?.().zoom;
+  const preserveZoom = Number.isFinite(Number(zoom)) ? [{ zoom: Number(zoom) }] : undefined;
+  const frameRate = { min: 25, ideal: 30, max: 30 };
+  const attempts = [
+    {
+      width: { exact: width }, height: { exact: height },
+      aspectRatio: { exact: 16 / 9 }, frameRate,
+      ...(supports.resizeMode ? { resizeMode: { exact: "none" } } : {}),
+      ...(preserveZoom ? { advanced: preserveZoom } : {})
+    },
+    {
+      width: { exact: width }, height: { exact: height },
+      aspectRatio: { ideal: 16 / 9 }, frameRate,
+      ...(preserveZoom ? { advanced: preserveZoom } : {})
+    },
+    {
+      width: { min: Math.min(1280, width), ideal: width },
+      height: { min: Math.min(720, height), ideal: height },
+      aspectRatio: { ideal: 16 / 9 }, frameRate,
+      ...(supports.resizeMode ? { resizeMode: { ideal: "none" } } : {}),
+      ...(preserveZoom ? { advanced: preserveZoom } : {})
+    }
+  ];
+
+  for (const constraints of attempts) {
+    try {
+      await track.applyConstraints(constraints);
+      const actual = track.getSettings?.() || {};
+      const longSide = Math.max(Number(actual.width) || 0, Number(actual.height) || 0);
+      const shortSide = Math.min(Number(actual.width) || 0, Number(actual.height) || 0);
+      if (longSide >= width && shortSide >= height) {
+        const message = `Resolução ativa: ${actual.width} × ${actual.height} • ${Math.round(actual.frameRate || 30)} fps`;
+        updateResolutionDiagnostic(message);
+        return { label: width === 1920 ? "1080p" : "720p", settings: actual };
+      }
+    } catch (error) {
+      if (error.name !== "OverconstrainedError") console.warn("Resolution constraint failed", error);
+    }
+  }
+
+  const actual = track.getSettings?.() || {};
+  const message = `Safari limitou para ${actual.width || "?"} × ${actual.height || "?"} • solicitado ${width} × ${height}`;
+  updateResolutionDiagnostic(message);
+  showToast("Confira nas configurações a resolução realmente aplicada");
+  return { label: `${Math.max(actual.width || 0, actual.height || 0)}p real`, settings: actual };
+}
+
+function updateResolutionDiagnostic(message) {
+  state.resolutionDiagnostic = message;
+  if (elements.resolutionDiagnostic) elements.resolutionDiagnostic.textContent = message;
+}
+
 function startRecorder() {
   if (!state.running || !state.stream) return;
   const mimeType = chooseMimeType();
 
+  const recorderOptions = {
+    ...(mimeType ? { mimeType } : {}),
+    videoBitsPerSecond: state.settings.quality === 1080 ? 10_000_000 : 5_000_000,
+    ...(state.settings.audio ? { audioBitsPerSecond: 192_000 } : {})
+  };
+
   try {
-    state.recorder = new MediaRecorder(state.stream, mimeType ? { mimeType } : undefined);
+    state.recorder = new MediaRecorder(state.stream, recorderOptions);
   } catch {
     state.recorder = new MediaRecorder(state.stream);
   }
@@ -525,6 +605,7 @@ function applySettingsToUI() {
   elements.qualitySelect.value = state.settings.quality;
   elements.cameraSelect.value = state.settings.camera || "auto";
   updateCameraDiagnostic(state.cameraDiagnostic);
+  updateResolutionDiagnostic(state.resolutionDiagnostic);
   elements.orientationSelect.value = state.settings.orientation;
   elements.audioToggle.checked = state.settings.audio;
   elements.bufferLabel.textContent = `${state.settings.duration}s`;
