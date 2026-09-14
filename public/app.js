@@ -535,7 +535,7 @@ async function upscaleReplay(replay, button) {
 
   try {
     const allReplays = await getReplays();
-    let enhanced = allReplays.find(item => item.quality === "1080p" && item.sourceId === replay.id);
+    let enhanced = allReplays.find(item => item.quality === "1080p" && item.sourceId === replay.id && item.exportVersion === "1.9");
 
     if (!enhanced) {
       const form = new FormData();
@@ -566,6 +566,7 @@ async function upscaleReplay(replay, button) {
         createdAt: Date.now(),
         duration: replay.duration,
         quality: "1080p",
+        exportVersion: "1.9",
         width: dimensions.width,
         height: dimensions.height,
         blob

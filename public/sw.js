@@ -1,4 +1,4 @@
-const CACHE = "jb-replay-v1.8";
+const CACHE = "jb-replay-v1.9";
 const APP_SHELL = ["/", "/index.html", "/styles.css", "/app.js", "/manifest.webmanifest", "/icon.svg", "/icon-180.png", "/icon-192.png", "/icon-512.png"];
 
 self.addEventListener("install", event => {
