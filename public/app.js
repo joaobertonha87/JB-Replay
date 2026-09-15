@@ -6,9 +6,11 @@ const elements = {
   watchDialog: $("#watchDialog"), watchSetupButton: $("#watchSetupButton"), closeWatchDialog: $("#closeWatchDialog"),
   copyUrlButton: $("#copyUrlButton"), testWatchButton: $("#testWatchButton"), watchUrl: $("#watchUrl"),
   cameraStatus: $("#cameraStatus"), watchStatus: $("#watchStatus"), recordDot: $("#recordDot"),
-  bufferLabel: $("#bufferLabel"), buttonSeconds: $("#buttonSeconds"), toast: $("#toast"),
+  bufferLabel: $("#bufferLabel"), buttonSeconds: $("#buttonSeconds"), buttonPostSeconds: $("#buttonPostSeconds"), toast: $("#toast"),
+  captureInfo: $("#captureInfo"), lensSwitcher: $("#lensSwitcher"),
+  queueStatus: $("#queueStatus"), queueText: $("#queueText"), queueCount: $("#queueCount"),
   gallery: $("#gallery"), emptyGallery: $("#emptyGallery"), replayCount: $("#replayCount"),
-  durationSelect: $("#durationSelect"), qualitySelect: $("#qualitySelect"), cameraSelect: $("#cameraSelect"),
+  durationSelect: $("#durationSelect"), postRollSelect: $("#postRollSelect"), qualitySelect: $("#qualitySelect"), cameraSelect: $("#cameraSelect"),
   cameraDiagnostic: $("#cameraDiagnostic"), resolutionDiagnostic: $("#resolutionDiagnostic"),
   orientationSelect: $("#orientationSelect"), audioToggle: $("#audioToggle"), saveSettingsButton: $("#saveSettingsButton")
 };
@@ -18,6 +20,9 @@ const state = {
   recorder: null,
   running: false,
   saving: false,
+  upscaling: false,
+  replayQueue: [],
+  currentReplayJob: null,
   segments: [],
   initSegment: null,
   chunkStartedAt: null,
@@ -56,7 +61,17 @@ function registerEvents() {
     if (!response.ok) showToast("Inicie a câmera primeiro");
   });
   elements.saveSettingsButton.addEventListener("click", saveSettings);
-  window.addEventListener("beforeunload", stopCamera);
+  elements.lensSwitcher.querySelectorAll("[data-camera]").forEach(button => {
+    button.addEventListener("click", () => switchCamera(button.dataset.camera));
+  });
+  window.addEventListener("beforeunload", event => {
+    if (hasPendingWork()) {
+      event.preventDefault();
+      event.returnValue = "";
+      return;
+    }
+    stopCamera(true);
+  });
 
   socket.on("connect", registerController);
   socket.on("controller:ready", () => {
@@ -73,8 +88,38 @@ function registerController() {
 }
 
 async function toggleCamera() {
-  if (state.running) stopCamera();
+  if (state.running) {
+    if (hasPendingWork()) {
+      showToast("Aguarde os replays pendentes antes de encerrar");
+      return;
+    }
+    stopCamera();
+  }
   else await startCamera();
+}
+
+async function switchCamera(mode) {
+  if (hasPendingWork()) {
+    showToast("Aguarde a fila terminar para trocar a câmera");
+    return;
+  }
+
+  state.settings.camera = mode;
+  localStorage.setItem("jb-replay-settings", JSON.stringify(state.settings));
+  applySettingsToUI();
+  updateQuickCameraUI();
+
+  if (!state.running) {
+    showToast("Câmera selecionada — toque em Iniciar câmera");
+    return;
+  }
+
+  elements.lensSwitcher.querySelectorAll("button").forEach(button => { button.disabled = true; });
+  showToast("Trocando câmera…");
+  stopCamera(true);
+  await delay(180);
+  await startCamera();
+  elements.lensSwitcher.querySelectorAll("button").forEach(button => { button.disabled = false; });
 }
 
 async function startCamera() {
@@ -153,7 +198,8 @@ async function openCameraStream(camera, audio) {
   }
 }
 
-function stopCamera() {
+function stopCamera(force = false) {
+  if (!force && hasPendingWork()) return false;
   state.running = false;
   if (state.recorder?.state === "recording") state.recorder.stop();
   state.stream?.getTracks().forEach(track => track.stop());
@@ -161,6 +207,7 @@ function stopCamera() {
   elements.video.srcObject = null;
   state.segments = [];
   setCameraUI(false);
+  return true;
 }
 
 function setCameraUI(active, lensLabel = "") {
@@ -168,10 +215,22 @@ function setCameraUI(active, lensLabel = "") {
   elements.video.classList.toggle("active", active);
   elements.placeholder.classList.toggle("hidden", active);
   elements.recordDot.classList.toggle("live", active);
+  elements.lensSwitcher.hidden = !active;
   elements.cameraStatus.textContent = active ? `Buffer ativo${lensLabel ? ` • ${lensLabel}` : ""}` : "Em espera";
   elements.cameraButton.innerHTML = active ? "<span>■</span> Encerrar câmera" : "<span>●</span> Iniciar câmera";
   elements.replayButton.disabled = !active;
   elements.watchStatus.textContent = active ? "Conectado e pronto" : "Conectado — inicie a câmera";
+  if (!active) elements.captureInfo.textContent = "Aguardando câmera";
+  updateQuickCameraUI();
+}
+
+function updateQuickCameraUI() {
+  const activeMode = state.settings.camera === "auto" ? "main" : state.settings.camera;
+  elements.lensSwitcher.querySelectorAll("[data-camera]").forEach(button => {
+    const isActive = button.dataset.camera === activeMode;
+    button.classList.toggle("active", isActive);
+    button.setAttribute("aria-pressed", String(isActive));
+  });
 }
 
 async function resolveCamera(mode) {
@@ -274,8 +333,12 @@ function updateCameraDiagnostic(message) {
 
 function reportCaptureResolution(track) {
   const actual = track.getSettings?.() || {};
-  const message = `Captura original: ${actual.width || "automática"} × ${actual.height || "automática"} • ${Math.round(actual.frameRate || 30)} fps`;
+  const width = actual.width || "automática";
+  const height = actual.height || "automática";
+  const fps = Math.round(actual.frameRate || 30);
+  const message = `Captura original: ${width} × ${height} • ${fps} fps`;
   updateResolutionDiagnostic(message);
+  elements.captureInfo.textContent = `${width} × ${height} • ${fps} fps`;
   return { label: "original", settings: actual };
 }
 
@@ -381,57 +444,111 @@ async function splitMp4Chunk(blob) {
 }
 
 function trimSegments() {
-  const keepAfter = Date.now() - ((state.settings.duration + 12) * 1000);
+  let keepAfter = Date.now() - ((state.settings.duration + state.settings.postRoll + 12) * 1000);
+  const waitingJobs = [state.currentReplayJob, ...state.replayQueue]
+    .filter(job => job && !job.captureComplete);
+  if (waitingJobs.length) {
+    const earliestRequired = Math.min(...waitingJobs.map(job => job.triggerAt - (job.duration * 1000) - 2500));
+    keepAfter = Math.min(keepAfter, earliestRequired);
+  }
   state.segments = state.segments.filter(segment => segment.endedAt >= keepAfter);
 }
 
-async function requestReplay(source) {
+function requestReplay(source) {
   if (!state.running) {
     showToast("Inicie a câmera primeiro");
     return;
   }
-  if (state.saving) {
-    showToast("Um replay já está sendo preparado");
+  if (state.replayQueue.length + (state.currentReplayJob ? 1 : 0) >= 6) {
+    showToast("Fila cheia — aguarde um replay terminar");
     return;
   }
 
-  state.saving = true;
-  elements.replayButton.disabled = true;
-  elements.cameraStatus.textContent = "Preparando replay";
+  const job = {
+    id: crypto.randomUUID(),
+    source,
+    triggerAt: Date.now(),
+    duration: state.settings.duration,
+    postRoll: state.settings.postRoll,
+    captureComplete: false
+  };
+  state.replayQueue.push(job);
+  updateQueueUI();
   if (navigator.vibrate) navigator.vibrate([90, 50, 90]);
-  showToast(source === "watch" ? "Comando recebido do relógio" : "Replay solicitado");
+  const queued = state.replayQueue.length + (state.currentReplayJob ? 1 : 0);
+  const suffix = job.postRoll ? ` • +${job.postRoll}s` : "";
+  showToast(source === "watch" ? `Relógio recebido • fila ${queued}${suffix}` : `Replay na fila ${queued}${suffix}`);
+  processReplayQueue();
+}
 
-  try {
-    // Fecha imediatamente o segmento atual. O lance salvo termina no momento
-    // do toque, sem adicionar segundos ocultos ao tempo escolhido.
-    await forceBoundary();
-    const end = Date.now();
-    const start = end - (state.settings.duration * 1000);
-    const selected = state.segments.filter(segment => segment.endedAt >= start && segment.startedAt <= end);
-    if (!selected.length) throw new Error("Ainda não há vídeo suficiente.");
+async function processReplayQueue() {
+  if (state.saving || state.upscaling || !state.running) return;
+  state.saving = true;
 
-    elements.cameraStatus.textContent = "Enviando replay…";
-    const replayBlob = await renderReplay(selected, state.settings.duration, state.initSegment);
-    elements.cameraStatus.textContent = "Salvando no iPhone…";
-    const replay = {
-      id: crypto.randomUUID(),
-      createdAt: Date.now(),
-      duration: Math.min(state.settings.duration, Math.round((selected.at(-1).endedAt - selected[0].startedAt) / 1000)),
-      blob: replayBlob
-    };
-    await saveReplay(replay);
-    await renderGallery();
-    showToast("Replay salvo com sucesso!");
-  } catch (error) {
-    console.error(error);
-    showToast(error.message || "Não foi possível salvar o replay");
-  } finally {
-    state.saving = false;
-    elements.replayButton.disabled = !state.running;
-    elements.cameraStatus.textContent = state.running
-      ? `Buffer ativo${state.activeLens ? ` • ${state.activeLens}` : ""}`
-      : "Em espera";
+  while (state.replayQueue.length && state.running) {
+    const job = state.replayQueue.shift();
+    state.currentReplayJob = job;
+    updateQueueUI();
+
+    try {
+      await processReplayJob(job);
+      showToast("Replay salvo com sucesso!");
+    } catch (error) {
+      console.error(error);
+      showToast(error.message || "Não foi possível salvar o replay");
+    } finally {
+      state.currentReplayJob = null;
+      updateQueueUI();
+      trimSegments();
+    }
   }
+
+  state.saving = false;
+  updateQueueUI();
+  restoreCameraStatus();
+}
+
+async function processReplayJob(job) {
+  const captureEnd = job.triggerAt + (job.postRoll * 1000);
+  const remaining = captureEnd - Date.now();
+  if (remaining > 0) {
+    elements.cameraStatus.textContent = `Gravando +${job.postRoll}s depois…`;
+    await delay(remaining);
+  }
+
+  await forceBoundary();
+  await state.chunkChain;
+  const captureStart = job.triggerAt - (job.duration * 1000);
+  const selected = state.segments.filter(segment => segment.endedAt >= captureStart && segment.startedAt <= captureEnd);
+  if (!selected.length) throw new Error("Ainda não há vídeo suficiente.");
+  job.captureComplete = true;
+
+  const totalDuration = job.duration + job.postRoll;
+  elements.cameraStatus.textContent = "Enviando replay…";
+  const replayBlob = await renderReplay(selected, totalDuration, state.initSegment);
+  elements.cameraStatus.textContent = "Salvando no iPhone…";
+  const replay = {
+    id: crypto.randomUUID(),
+    createdAt: job.triggerAt,
+    duration: Math.min(totalDuration, Math.max(1, Math.round((selected.at(-1).endedAt - selected[0].startedAt) / 1000))),
+    preDuration: job.duration,
+    postDuration: job.postRoll,
+    camera: state.settings.camera,
+    blob: replayBlob
+  };
+  await saveReplay(replay);
+  await renderGallery();
+}
+
+function updateQueueUI() {
+  const total = state.replayQueue.length + (state.currentReplayJob ? 1 : 0);
+  elements.queueStatus.hidden = total === 0;
+  elements.queueCount.textContent = String(total);
+  elements.queueText.textContent = total === 1 ? "1 replay sendo preparado" : `${total} replays na fila`;
+}
+
+function hasPendingWork() {
+  return state.saving || state.upscaling || state.replayQueue.length > 0 || Boolean(state.currentReplayJob);
 }
 
 async function renderReplay(segments, duration, initSegment) {
@@ -496,10 +613,13 @@ async function renderGallery() {
     card.className = "replay-card";
     card.dataset.replayId = replay.id;
     const date = new Intl.DateTimeFormat("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }).format(replay.createdAt);
+    const durationLabel = replay.postDuration
+      ? `${replay.duration}s (${replay.preDuration}+${replay.postDuration})`
+      : `${replay.duration}s`;
     card.innerHTML = `
       <video src="${url}" controls playsinline preload="metadata"></video>
       <div class="replay-meta">
-        <div><strong>Replay ${replays.length - index}</strong><small>${date} · ${replay.duration}s · ${replay.quality === "1080p" ? "1080p ampliado" : "Original"}</small></div>
+        <div><strong>Replay ${replays.length - index}</strong><small>${date} · ${durationLabel} · ${replay.quality === "1080p" ? "1080p ampliado" : "Original"}</small></div>
         <div class="replay-actions">
           ${replay.quality === "1080p"
             ? '<button type="button" data-action="share" class="upscale-action ready-action" title="Salvar o vídeo 1080p no iPhone">Salvar 1080p</button>'
@@ -520,6 +640,15 @@ async function renderGallery() {
 }
 
 async function upscaleReplay(replay, button) {
+  if (state.saving || state.replayQueue.length || state.currentReplayJob) {
+    showToast("Aguarde a fila de replays terminar");
+    return;
+  }
+  if (state.upscaling) {
+    showToast("Uma versão 1080p já está sendo gerada");
+    return;
+  }
+  state.upscaling = true;
   button.disabled = true;
   const originalLabel = button.textContent;
   let elapsedSeconds = 0;
@@ -584,11 +713,13 @@ async function upscaleReplay(replay, button) {
     restoreCameraStatus();
   } finally {
     clearInterval(progressTimer);
+    state.upscaling = false;
     if (button.isConnected) {
       button.disabled = false;
       button.textContent = originalLabel;
       button.classList.remove("processing");
     }
+    processReplayQueue();
   }
 }
 
@@ -655,9 +786,15 @@ async function copyWatchUrl() {
   showToast("Endereço copiado");
 }
 
-function saveSettings() {
+function saveSettings(event) {
+  if (hasPendingWork()) {
+    event?.preventDefault();
+    showToast("Aguarde a fila terminar para alterar configurações");
+    return;
+  }
   state.settings = {
     duration: Number(elements.durationSelect.value),
+    postRoll: Number(elements.postRollSelect.value),
     quality: Number(elements.qualitySelect.value),
     camera: elements.cameraSelect.value,
     orientation: elements.orientationSelect.value,
@@ -673,14 +810,15 @@ function saveSettings() {
 
 function loadSettings() {
   try {
-    return { duration: 40, quality: 720, camera: "auto", orientation: "landscape", audio: true, ...JSON.parse(localStorage.getItem("jb-replay-settings")), quality: 720 };
+    return { duration: 40, postRoll: 3, quality: 720, camera: "auto", orientation: "landscape", audio: true, ...JSON.parse(localStorage.getItem("jb-replay-settings")), quality: 720 };
   } catch {
-    return { duration: 40, quality: 720, camera: "auto", orientation: "landscape", audio: true };
+    return { duration: 40, postRoll: 3, quality: 720, camera: "auto", orientation: "landscape", audio: true };
   }
 }
 
 function applySettingsToUI() {
   elements.durationSelect.value = state.settings.duration;
+  elements.postRollSelect.value = state.settings.postRoll;
   elements.qualitySelect.value = state.settings.quality;
   elements.cameraSelect.value = state.settings.camera || "auto";
   updateCameraDiagnostic(state.cameraDiagnostic);
@@ -689,6 +827,8 @@ function applySettingsToUI() {
   elements.audioToggle.checked = state.settings.audio;
   elements.bufferLabel.textContent = `${state.settings.duration}s`;
   elements.buttonSeconds.textContent = state.settings.duration;
+  elements.buttonPostSeconds.textContent = state.settings.postRoll;
+  updateQuickCameraUI();
 }
 
 function getControllerKey() {

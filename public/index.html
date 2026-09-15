@@ -39,6 +39,12 @@
       </div>
 
       <div class="frame-corners" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+      <div class="capture-info" id="captureInfo">Aguardando câmera</div>
+      <div class="lens-switcher" id="lensSwitcher" hidden aria-label="Troca rápida de câmera">
+        <button type="button" data-camera="ultrawide">0,5×</button>
+        <button type="button" data-camera="main">1×</button>
+        <button type="button" data-camera="front">Frontal</button>
+      </div>
       <div class="toast" id="toast" role="status"></div>
     </section>
 
@@ -54,8 +60,13 @@
       <button id="cameraButton" class="secondary-action"><span>●</span> Iniciar câmera</button>
       <button id="replayButton" class="replay-action" disabled>
         <span class="replay-ring"><b>↶</b></span>
-        <span><strong>Salvar replay</strong><small>últimos <b id="buttonSeconds">40</b> segundos</small></span>
+        <span><strong>Salvar replay</strong><small><b id="buttonSeconds">40</b>s antes + <b id="buttonPostSeconds">3</b>s depois</small></span>
       </button>
+    </section>
+
+    <section class="queue-status" id="queueStatus" hidden aria-live="polite">
+      <span><i></i><b id="queueText">Preparando replay</b></span>
+      <strong id="queueCount">1</strong>
     </section>
 
     <section class="gallery-section">
@@ -79,6 +90,14 @@
           <option value="30">30 segundos</option>
           <option value="40" selected>40 segundos</option>
         </select>
+      </label>
+      <label>Continuação depois do toque
+        <select id="postRollSelect">
+          <option value="0">Sem continuação</option>
+          <option value="3" selected>3 segundos depois</option>
+          <option value="5">5 segundos depois</option>
+        </select>
+        <small class="camera-diagnostic">Ajuda a registrar o final do ponto e a comemoração.</small>
       </label>
       <label>Qualidade
         <select id="qualitySelect">
