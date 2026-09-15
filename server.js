@@ -105,8 +105,8 @@ app.post("/api/render", upload.array("segments", 40), async (req, res) => {
       await runFfmpeg([
         "-hide_banner", "-loglevel", "error", "-y",
         "-sseof", `-${requestedDuration}`, "-i", joinedPath,
-        "-map", "0:v:0", "-map", "0:a?", "-t", String(requestedDuration),
-        "-c", "copy", "-avoid_negative_ts", "make_zero",
+        "-map", "0:v:0", "-map", "0:a?", "-copyts", "-start_at_zero",
+        "-t", String(requestedDuration), "-c", "copy",
         "-movflags", "+faststart", outputPath
       ]);
     } catch {
