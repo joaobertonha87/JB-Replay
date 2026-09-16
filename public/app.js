@@ -858,7 +858,7 @@ function saveSettings(event) {
   state.settings = {
     duration: Number(elements.durationSelect.value),
     postRoll: Number(elements.postRollSelect.value),
-    quality: elements.qualitySelect.value,
+    quality: normalizeQuality(elements.qualitySelect.value),
     camera: elements.cameraSelect.value,
     orientation: elements.orientationSelect.value,
     audio: elements.audioToggle.checked
@@ -875,11 +875,15 @@ function loadSettings() {
   const defaults = { duration: 40, postRoll: 3, quality: "original", camera: "auto", orientation: "landscape", audio: true };
   try {
     const saved = JSON.parse(localStorage.getItem("jb-replay-settings")) || {};
-    const quality = saved.quality === "1080p60" ? "1080p60" : "original";
+    const quality = normalizeQuality(saved.quality);
     return { ...defaults, ...saved, quality };
   } catch {
     return defaults;
   }
+}
+
+function normalizeQuality(value) {
+  return value === "1080p60" ? "1080p60" : "original";
 }
 
 function applySettingsToUI() {
