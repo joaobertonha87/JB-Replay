@@ -20,7 +20,7 @@ const upload = multer({
   // Grava os segmentos no disco temporário para não ocupar toda a memória do
   // serviço durante uploads em 1080p.
   dest: os.tmpdir(),
-  limits: { files: 40, fileSize: 120 * 1024 * 1024, fieldSize: 1024 * 1024 }
+  limits: { files: 40, fileSize: 220 * 1024 * 1024, fieldSize: 1024 * 1024 }
 });
 
 app.disable("x-powered-by");
@@ -48,6 +48,38 @@ app.all("/api/trigger", (req, res) => {
 
   io.to(target.socketId).emit("replay:trigger", { at: Date.now(), source: "watch" });
   return res.json({ ok: true, message: "Replay solicitado!", at: new Date().toISOString() });
+});
+
+app.all("/api/camera", (req, res) => {
+  const key = String(req.query.key || req.body?.key || "").trim();
+  const mode = String(req.query.mode || req.body?.mode || "").trim();
+  const target = controllers.get(key);
+  const labels = {
+    ultrawide: "0,5× ultra-angular",
+    main: "1× principal",
+    front: "frontal"
+  };
+
+  if (!key || !target) {
+    return res.status(404).json({ ok: false, message: "JB Replay não está conectado." });
+  }
+  if (!labels[mode]) {
+    return res.status(400).json({ ok: false, message: "Câmera inválida." });
+  }
+
+  // Aguarda a confirmação real do iPhone antes de responder ao Atalho. Assim,
+  // o relógio não informa sucesso se a câmera estiver fechada ou houver replay
+  // pendente na fila.
+  io.to(target.socketId).timeout(15000).emit("camera:switch", { mode, at: Date.now(), source: "watch" }, (error, responses) => {
+    if (error) {
+      return res.status(504).json({ ok: false, message: "O iPhone não confirmou a troca da câmera." });
+    }
+    const result = responses?.[0] || {};
+    if (!result.ok) {
+      return res.status(409).json({ ok: false, message: result.message || "Não foi possível trocar a câmera." });
+    }
+    return res.json({ ok: true, message: `Câmera ${labels[mode]} ativa!`, mode });
+  });
 });
 
 app.post("/api/render", upload.array("segments", 40), async (req, res) => {
