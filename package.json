@@ -1,6 +1,6 @@
 {
   "name": "jb-replay",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "private": true,
   "description": "Replay retroativo para aulas de beach tennis controlado pelo Apple Watch",
   "type": "module",

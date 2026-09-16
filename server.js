@@ -28,8 +28,8 @@ app.use(express.json({ limit: "64kb" }));
 app.use(express.static("public", {
   maxAge: "1h",
   setHeaders(res, filePath) {
-    if (filePath.endsWith("sw.js") || filePath.endsWith("index.html")) {
-      res.setHeader("Cache-Control", "no-cache");
+    if (filePath.endsWith("sw.js") || filePath.endsWith("index.html") || filePath.endsWith("app.js")) {
+      res.setHeader("Cache-Control", "no-store, max-age=0, must-revalidate");
     }
   }
 }));
