@@ -30,6 +30,7 @@ const state = {
   boundaryResolver: null,
   activeLens: "",
   captureDetails: null,
+  strict60Accepted: false,
   cameraDiagnostic: "A lente será confirmada quando a câmera iniciar.",
   resolutionDiagnostic: "O replay será salvo sem ampliação. Depois, você poderá gerar uma cópia em 1080p.",
   settings: loadSettings(),
@@ -158,10 +159,16 @@ async function startCamera() {
       : await resolveCamera(state.settings.camera);
     const capture = await openCameraStream(camera, state.settings.audio);
     state.stream = capture.stream;
+    state.strict60Accepted = capture.strict60Accepted;
     if (!capture.usedSelectedCamera) camera = null;
 
+    const videoTrack = state.stream.getVideoTracks()[0];
+    if (state.settings.quality === "1080p60" && "contentHint" in videoTrack) {
+      try { videoTrack.contentHint = "motion"; } catch { /* Safari pode ignorar esta preferência. */ }
+    }
+
     const selectedLens = await applyLensPreference(state.stream, state.settings.camera, camera);
-    const resolution = reportCaptureResolution(state.stream.getVideoTracks()[0]);
+    const resolution = reportCaptureResolution(videoTrack);
 
     elements.video.srcObject = state.stream;
     await elements.video.play();
@@ -197,10 +204,32 @@ async function openCameraStream(camera, audio) {
     aspectRatio: { ideal: 16 / 9 }
   };
 
+  // Primeiro exige Full HD a 60 fps. O Safari só aceitará esta chamada se a
+  // lente realmente disponibilizar esse perfil para páginas web/PWAs.
+  if (highFrameRate) {
+    const strictConstraints = {
+      ...source,
+      width: { min: 1920, ideal: 1920 },
+      height: { min: 1080, ideal: 1080 },
+      frameRate: { exact: 60 },
+      aspectRatio: { ideal: 16 / 9 }
+    };
+    try {
+      return {
+        stream: await navigator.mediaDevices.getUserMedia({ video: strictConstraints, audio }),
+        usedSelectedCamera: Boolean(camera?.deviceId),
+        strict60Accepted: true
+      };
+    } catch (error) {
+      console.warn("1080p60 estrito indisponível; usando modo adaptado", error);
+    }
+  }
+
   try {
     return {
       stream: await navigator.mediaDevices.getUserMedia({ video: constraints, audio }),
-      usedSelectedCamera: Boolean(camera?.deviceId)
+      usedSelectedCamera: Boolean(camera?.deviceId),
+      strict60Accepted: false
     };
   } catch (error) {
     if (wantsFront) {
@@ -210,7 +239,8 @@ async function openCameraStream(camera, audio) {
       constraints.facingMode = { ideal: "user" };
       return {
         stream: await navigator.mediaDevices.getUserMedia({ video: constraints, audio }),
-        usedSelectedCamera: false
+        usedSelectedCamera: false,
+        strict60Accepted: false
       };
     }
     if (!camera?.deviceId) throw error;
@@ -218,7 +248,8 @@ async function openCameraStream(camera, audio) {
     constraints.facingMode = { ideal: wantsFront ? "user" : "environment" };
     return {
       stream: await navigator.mediaDevices.getUserMedia({ video: constraints, audio }),
-      usedSelectedCamera: false
+      usedSelectedCamera: false,
+      strict60Accepted: false
     };
   }
 }
@@ -367,11 +398,11 @@ function reportCaptureResolution(track) {
   const is60Fps = fps >= 55;
   const targetReached = !requestedHighFrameRate || (isFullHd && is60Fps);
   const message = requestedHighFrameRate && !targetReached
-    ? `Modo 1080p · 60 solicitado; o iPhone entregou ${width} × ${height} • ${fps} fps.`
+    ? `60 fps exigido, mas o Safari recusou; usando ${width} × ${height} • ${fps} fps.`
     : `Captura original: ${width} × ${height} • ${fps} fps`;
   updateResolutionDiagnostic(message);
   elements.captureInfo.textContent = `${width} × ${height} • ${fps} fps`;
-  state.captureDetails = { width, height, fps, targetReached, mode: state.settings.quality };
+  state.captureDetails = { width, height, fps, targetReached, mode: state.settings.quality, strict60Accepted: state.strict60Accepted };
   if (requestedHighFrameRate && !targetReached) {
     showToast(`Limite desta câmera: ${width} × ${height} • ${fps} fps`);
   }
