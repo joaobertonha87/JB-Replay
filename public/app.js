@@ -29,6 +29,7 @@ const state = {
   chunkChain: Promise.resolve(),
   boundaryResolver: null,
   activeLens: "",
+  captureDetails: null,
   cameraDiagnostic: "A lente será confirmada quando a câmera iniciar.",
   resolutionDiagnostic: "O replay será salvo sem ampliação. Depois, você poderá gerar uma cópia em 1080p.",
   settings: loadSettings(),
@@ -56,11 +57,15 @@ function registerEvents() {
   elements.watchSetupButton.addEventListener("click", openWatchSetup);
   elements.closeWatchDialog.addEventListener("click", () => elements.watchDialog.close());
   elements.copyUrlButton.addEventListener("click", copyWatchUrl);
+  elements.watchDialog.querySelectorAll("[data-copy-camera]").forEach(button => {
+    button.addEventListener("click", () => copyCameraUrl(button.dataset.copyCamera));
+  });
   elements.testWatchButton.addEventListener("click", async () => {
     const response = await fetch(watchTriggerUrl());
     if (!response.ok) showToast("Inicie a câmera primeiro");
   });
   elements.saveSettingsButton.addEventListener("click", saveSettings);
+  elements.qualitySelect.addEventListener("change", updateQualityPreview);
   elements.lensSwitcher.querySelectorAll("[data-camera]").forEach(button => {
     button.addEventListener("click", () => switchCamera(button.dataset.camera));
   });
@@ -78,6 +83,10 @@ function registerEvents() {
     elements.watchStatus.textContent = state.running ? "Conectado e pronto" : "Conectado — inicie a câmera";
   });
   socket.on("replay:trigger", () => requestReplay("watch"));
+  socket.on("camera:switch", async (payload, acknowledge) => {
+    const result = await switchCamera(payload?.mode, { remote: true });
+    if (typeof acknowledge === "function") acknowledge(result);
+  });
   socket.on("disconnect", () => {
     elements.watchStatus.textContent = "Reconectando…";
   });
@@ -98,10 +107,21 @@ async function toggleCamera() {
   else await startCamera();
 }
 
-async function switchCamera(mode) {
+async function switchCamera(mode, { remote = false } = {}) {
+  if (!["ultrawide", "main", "front"].includes(mode)) {
+    return { ok: false, message: "Câmera inválida." };
+  }
   if (hasPendingWork()) {
     showToast("Aguarde a fila terminar para trocar a câmera");
-    return;
+    return { ok: false, message: "Há replays pendentes. Aguarde a fila terminar." };
+  }
+  if (remote && !state.running) {
+    showToast("Inicie a câmera no iPhone primeiro");
+    return { ok: false, message: "Inicie a câmera no iPhone primeiro." };
+  }
+  if (state.running && state.settings.camera === mode) {
+    showToast("Essa câmera já está ativa");
+    return { ok: true, message: "Essa câmera já está ativa.", mode };
   }
 
   state.settings.camera = mode;
@@ -111,15 +131,17 @@ async function switchCamera(mode) {
 
   if (!state.running) {
     showToast("Câmera selecionada — toque em Iniciar câmera");
-    return;
+    return { ok: true, message: "Câmera selecionada.", mode };
   }
 
   elements.lensSwitcher.querySelectorAll("button").forEach(button => { button.disabled = true; });
   showToast("Trocando câmera…");
   stopCamera(true);
   await delay(180);
-  await startCamera();
+  const started = await startCamera();
   elements.lensSwitcher.querySelectorAll("button").forEach(button => { button.disabled = false; });
+  if (!started) return { ok: false, message: "O iPhone não conseguiu abrir essa câmera." };
+  return { ok: true, message: "Câmera alterada.", mode };
 }
 
 async function startCamera() {
@@ -151,14 +173,17 @@ async function startCamera() {
     startRecorder();
     registerController();
     showToast("Câmera e replay ativados");
+    return true;
   } catch (error) {
     console.error(error);
     showToast("Autorize o acesso à câmera e ao microfone");
+    return false;
   }
 }
 
 async function openCameraStream(camera, audio) {
   const wantsFront = state.settings.camera === "front";
+  const highFrameRate = state.settings.quality === "1080p60";
   const source = wantsFront
     ? { facingMode: { exact: "user" } }
     : camera?.deviceId
@@ -166,9 +191,9 @@ async function openCameraStream(camera, audio) {
     : { facingMode: { ideal: wantsFront ? "user" : "environment" } };
   const constraints = {
     ...source,
-    width: { ideal: 1280 },
-    height: { ideal: 720 },
-    frameRate: { ideal: 30, max: 30 },
+    width: { ideal: highFrameRate ? 1920 : 1280 },
+    height: { ideal: highFrameRate ? 1080 : 720 },
+    frameRate: { ideal: highFrameRate ? 60 : 30, max: highFrameRate ? 60 : 30 },
     aspectRatio: { ideal: 16 / 9 }
   };
 
@@ -336,10 +361,21 @@ function reportCaptureResolution(track) {
   const width = actual.width || "automática";
   const height = actual.height || "automática";
   const fps = Math.round(actual.frameRate || 30);
-  const message = `Captura original: ${width} × ${height} • ${fps} fps`;
+  const requestedHighFrameRate = state.settings.quality === "1080p60";
+  const isFullHd = Math.max(Number(width) || 0, Number(height) || 0) >= 1920
+    && Math.min(Number(width) || 0, Number(height) || 0) >= 1080;
+  const is60Fps = fps >= 55;
+  const targetReached = !requestedHighFrameRate || (isFullHd && is60Fps);
+  const message = requestedHighFrameRate && !targetReached
+    ? `Modo 1080p · 60 solicitado; o iPhone entregou ${width} × ${height} • ${fps} fps.`
+    : `Captura original: ${width} × ${height} • ${fps} fps`;
   updateResolutionDiagnostic(message);
   elements.captureInfo.textContent = `${width} × ${height} • ${fps} fps`;
-  return { label: "original", settings: actual };
+  state.captureDetails = { width, height, fps, targetReached, mode: state.settings.quality };
+  if (requestedHighFrameRate && !targetReached) {
+    showToast(`Limite desta câmera: ${width} × ${height} • ${fps} fps`);
+  }
+  return { label: requestedHighFrameRate ? (targetReached ? "1080p · 60 fps" : "modo adaptado") : "original", settings: actual };
 }
 
 function updateResolutionDiagnostic(message) {
@@ -351,7 +387,11 @@ function startRecorder() {
   if (!state.running || !state.stream) return;
   const mimeType = chooseMimeType();
 
-  const recorderOptions = mimeType ? { mimeType } : undefined;
+  const highFrameRate = state.settings.quality === "1080p60";
+  const recorderOptions = {
+    ...(mimeType ? { mimeType } : {}),
+    ...(highFrameRate ? { videoBitsPerSecond: 16_000_000, audioBitsPerSecond: 192_000 } : {})
+  };
 
   try {
     state.recorder = new MediaRecorder(state.stream, recorderOptions);
@@ -534,6 +574,10 @@ async function processReplayJob(job) {
     preDuration: job.duration,
     postDuration: job.postRoll,
     camera: state.settings.camera,
+    captureMode: state.captureDetails?.mode || state.settings.quality,
+    captureWidth: state.captureDetails?.width,
+    captureHeight: state.captureDetails?.height,
+    captureFps: state.captureDetails?.fps,
     blob: replayBlob
   };
   await saveReplay(replay);
@@ -570,7 +614,8 @@ async function renderReplay(segments, duration, initSegment) {
     }
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 90000);
+    const timeoutMs = state.settings.quality === "1080p60" ? 180000 : 90000;
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const response = await fetch("/api/render", {
         method: "POST",
@@ -596,7 +641,7 @@ async function renderReplay(segments, duration, initSegment) {
   }
 
   if (lastError?.name === "AbortError") {
-    throw new Error("A conexão demorou demais. Use 720p ou confira o Wi-Fi.");
+    throw new Error("A conexão demorou demais. Use Original do Safari ou confira o Wi-Fi.");
   }
   throw new Error(lastError?.message || "Não foi possível salvar o replay.");
 }
@@ -616,10 +661,15 @@ async function renderGallery() {
     const durationLabel = replay.postDuration
       ? `${replay.duration}s (${replay.preDuration}+${replay.postDuration})`
       : `${replay.duration}s`;
+    const captureLabel = replay.quality === "1080p"
+      ? "1080p ampliado"
+      : replay.captureMode === "1080p60"
+        ? `${replay.captureWidth || "1080p"}×${replay.captureHeight || ""} • ${replay.captureFps || 60} fps`.replace("× •", "")
+        : "Original";
     card.innerHTML = `
       <video src="${url}" controls playsinline preload="metadata"></video>
       <div class="replay-meta">
-        <div><strong>Replay ${replays.length - index}</strong><small>${date} · ${durationLabel} · ${replay.quality === "1080p" ? "1080p ampliado" : "Original"}</small></div>
+        <div><strong>Replay ${replays.length - index}</strong><small>${date} · ${durationLabel} · ${captureLabel}</small></div>
         <div class="replay-actions">
           ${replay.quality === "1080p"
             ? '<button type="button" data-action="share" class="upscale-action ready-action" title="Salvar o vídeo 1080p no iPhone">Salvar 1080p</button>'
@@ -774,6 +824,9 @@ async function shareReplay(replay) {
 
 function openWatchSetup() {
   elements.watchUrl.textContent = watchTriggerUrl();
+  elements.watchDialog.querySelectorAll("[data-camera-url]").forEach(code => {
+    code.textContent = cameraCommandUrl(code.dataset.cameraUrl);
+  });
   elements.watchDialog.showModal();
 }
 
@@ -781,9 +834,19 @@ function watchTriggerUrl() {
   return `${location.origin}/api/trigger?key=${encodeURIComponent(state.controllerKey)}`;
 }
 
+function cameraCommandUrl(mode) {
+  return `${location.origin}/api/camera?key=${encodeURIComponent(state.controllerKey)}&mode=${encodeURIComponent(mode)}`;
+}
+
 async function copyWatchUrl() {
   await navigator.clipboard.writeText(watchTriggerUrl());
   showToast("Endereço copiado");
+}
+
+async function copyCameraUrl(mode) {
+  await navigator.clipboard.writeText(cameraCommandUrl(mode));
+  const labels = { ultrawide: "0,5×", main: "1×", front: "frontal" };
+  showToast(`Endereço da câmera ${labels[mode]} copiado`);
 }
 
 function saveSettings(event) {
@@ -795,7 +858,7 @@ function saveSettings(event) {
   state.settings = {
     duration: Number(elements.durationSelect.value),
     postRoll: Number(elements.postRollSelect.value),
-    quality: Number(elements.qualitySelect.value),
+    quality: elements.qualitySelect.value,
     camera: elements.cameraSelect.value,
     orientation: elements.orientationSelect.value,
     audio: elements.audioToggle.checked
@@ -809,10 +872,13 @@ function saveSettings(event) {
 }
 
 function loadSettings() {
+  const defaults = { duration: 40, postRoll: 3, quality: "original", camera: "auto", orientation: "landscape", audio: true };
   try {
-    return { duration: 40, postRoll: 3, quality: 720, camera: "auto", orientation: "landscape", audio: true, ...JSON.parse(localStorage.getItem("jb-replay-settings")), quality: 720 };
+    const saved = JSON.parse(localStorage.getItem("jb-replay-settings")) || {};
+    const quality = saved.quality === "1080p60" ? "1080p60" : "original";
+    return { ...defaults, ...saved, quality };
   } catch {
-    return { duration: 40, postRoll: 3, quality: 720, camera: "auto", orientation: "landscape", audio: true };
+    return defaults;
   }
 }
 
@@ -829,6 +895,15 @@ function applySettingsToUI() {
   elements.buttonSeconds.textContent = state.settings.duration;
   elements.buttonPostSeconds.textContent = state.settings.postRoll;
   updateQuickCameraUI();
+  if (!state.running) updateQualityPreview();
+}
+
+function updateQualityPreview() {
+  if (state.running) return;
+  const message = elements.qualitySelect.value === "1080p60"
+    ? "Solicita 1920 × 1080 a 60 fps. A resolução real será confirmada ao iniciar a câmera."
+    : "O replay será salvo sem ampliação. Depois, você poderá gerar uma cópia em 1080p.";
+  updateResolutionDiagnostic(message);
 }
 
 function getControllerKey() {

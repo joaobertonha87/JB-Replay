@@ -101,7 +101,8 @@
       </label>
       <label>Qualidade
         <select id="qualitySelect">
-          <option value="720" selected>Original do Safari — mais rápido</option>
+          <option value="original" selected>Original do Safari — mais rápido</option>
+          <option value="1080p60">Full HD 1080p · 60 fps</option>
         </select>
         <small id="resolutionDiagnostic" class="camera-diagnostic">O replay será salvo sem ampliação. Depois, você poderá gerar uma cópia em 1080p.</small>
       </label>
@@ -130,12 +131,19 @@
       <div class="sheet-handle"></div>
       <div class="sheet-title"><div><span>CONTROLE REMOTO</span><h2>Botão no Apple Watch</h2></div><button id="closeWatchDialog" aria-label="Fechar">×</button></div>
       <ol class="steps">
-        <li><b>1</b><span>No iPhone, abra o aplicativo <strong>Atalhos</strong>.</span></li>
-        <li><b>2</b><span>Crie um atalho com a ação <strong>Obter conteúdo do URL</strong>.</span></li>
-        <li><b>3</b><span>Cole o endereço pessoal abaixo e escolha o método GET.</span></li>
-        <li><b>4</b><span>Ative <strong>Mostrar no Apple Watch</strong> e nomeie como “Salvar Replay”.</span></li>
+        <li><b>1</b><span>No atalho atual, adicione <strong>Escolher do Menu</strong>.</span></li>
+        <li><b>2</b><span>Crie as opções <strong>Salvar Replay</strong> e <strong>Selecionar Câmera</strong>.</span></li>
+        <li><b>3</b><span>Em Selecionar Câmera, adicione outro menu com <strong>0,5×</strong>, <strong>1×</strong> e <strong>Frontal</strong>.</span></li>
+        <li><b>4</b><span>Em cada opção, use <strong>URL → Obter Conteúdo do URL</strong>, método GET.</span></li>
       </ol>
+      <span class="remote-section-title">SALVAR REPLAY</span>
       <div class="url-box"><code id="watchUrl"></code><button id="copyUrlButton">Copiar</button></div>
+      <span class="remote-section-title">SELECIONAR CÂMERA</span>
+      <div class="remote-command-list">
+        <div class="url-box"><strong>0,5×</strong><code data-camera-url="ultrawide"></code><button type="button" data-copy-camera="ultrawide">Copiar</button></div>
+        <div class="url-box"><strong>1×</strong><code data-camera-url="main"></code><button type="button" data-copy-camera="main">Copiar</button></div>
+        <div class="url-box"><strong>Frontal</strong><code data-camera-url="front"></code><button type="button" data-copy-camera="front">Copiar</button></div>
+      </div>
       <p class="privacy-note">Este endereço funciona como sua chave pessoal. Não compartilhe com outras pessoas.</p>
       <button id="testWatchButton" class="sheet-primary">Testar botão agora</button>
     </div>
